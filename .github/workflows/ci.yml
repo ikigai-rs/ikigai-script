@@ -1,0 +1,20 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}   # never cancel main
+jobs:
+  ci:
+    uses: ikigai-rs/.github/.github/workflows/rust.yml@main
+    # No inputs, and each absence is a decision:
+    #
+    # `features:` — this crate declares none.
+    #
+    # `wasm-lib:` — not claimed. The library itself is plain Rust, but `DirBackend` is
+    # `std::fs`, and a gate that has never run is not evidence. When a browser host wants
+    # scripts, the line goes in with the work that makes it true.
+    #
+    # msrv — automatic: `rust-version` in Cargo.toml makes the shared workflow run clippy
+    # and test on it.
