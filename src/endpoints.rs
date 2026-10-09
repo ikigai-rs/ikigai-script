@@ -6,25 +6,27 @@
 //! evaluator as a sub-request; `urn:script:eval` saves a draft by sinking to the script
 //! like any other writer.
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ikigai_core::{
     ActionSpec, ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation,
-    Iri, ReprType, Representation, Request, Result, UriTemplate, Verb,
+    Iri, ReprType, Representation, Request, Resolution, Result, Scope, Space, SpaceEntry,
+    Topology, UriTemplate, Verb,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::authority::{
-    self, cap_delete, cap_read, cap_run, cap_write, CeilingPolicy, PrincipalStamper, CAP_ANY,
-    CAP_DELETE, CAP_LISP, CAP_READ, CAP_READ_PUBLIC, CAP_RUN, CAP_RUN_PUBLIC, CAP_WRITE,
+    self, cap_delete, cap_read, cap_run, cap_write, Ceiling, CeilingPolicy, PrincipalStamper,
+    CAP_ANY, CAP_DELETE, CAP_LISP, CAP_READ, CAP_READ_PUBLIC, CAP_RUN, CAP_RUN_PUBLIC, CAP_WRITE,
 };
 use crate::backend::Backend;
 use crate::model::{
     self, Event, Head, Language, Outcome, Run, State, Version, MAX_RECORDED_RESULT, SCHEMA,
 };
 use crate::name::{self, CATALOG_IRI, EVAL_IRI};
+use crate::sparql::{self, Analysis, Form, Parameter, SparqlDoor, Value, CAP_READ_GRAPH};
 
 const PLAIN: &str = "text/plain";
 const JSON: &str = "application/json";
@@ -46,7 +48,16 @@ pub struct SpaceConfig {
     backend: Arc<dyn Backend>,
     ceiling: CeilingPolicy,
     principal: PrincipalStamper,
+    sparql: Option<SparqlDoor>,
+    on_change: Option<ChangeHook>,
+    /// Each published SPARQL script's own endpoints (its contract), built once per head and
+    /// dropped by every publish or retire through this crate. `None`: the template's.
+    described: Arc<Mutex<HashMap<String, Option<PerScript>>>>,
 }
+
+/// What a host runs when a script's head changes through this crate: see
+/// [`SpaceConfig::on_change`].
+pub type ChangeHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 impl SpaceConfig {
     /// Scripts kept in `backend`, each run under the ceiling `ceiling` answers for it.
@@ -55,6 +66,9 @@ impl SpaceConfig {
             backend,
             ceiling,
             principal: authority::unstamped(),
+            sparql: None,
+            on_change: None,
+            described: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -64,6 +78,40 @@ impl SpaceConfig {
         self.principal = stamper;
         self
     }
+
+    /// Accept SPARQL scripts, evaluated through `door` (the store's graph-scoped doors).
+    /// Without it, publishing `language=sparql` is refused: which store a query runs
+    /// against is the host's decision, as the evaluator a Lisp script reaches is.
+    pub fn sparql(mut self, door: SparqlDoor) -> SpaceConfig {
+        self.sparql = Some(door);
+        self
+    }
+
+    /// Run `hook` with the script's name after every publish or retire through this crate.
+    ///
+    /// ★ **Wire it to `kernel.cut(ikigai_core::BINDINGS_THREAD)`.** A published SPARQL
+    /// script is its own entry in the catalog and the action manifold (`…:result` and
+    /// `…:runs` with ITS parameters as arguments), and the kernel caches every description
+    /// and Meta answer under `urn:kernel:bindings`, which it cannot know a publish changed.
+    /// The library holds no kernel and an endpoint may not cut that thread without
+    /// `urn:cap:kernel:cut`, so the host, which holds both, makes the cut. Unwired, a new
+    /// query is runnable at once but the catalog, MCP and the engine's argument routing
+    /// describe the old set until something else cuts the thread.
+    pub fn on_change(mut self, hook: ChangeHook) -> SpaceConfig {
+        self.on_change = Some(hook);
+        self
+    }
+
+    /// A script's head changed through this crate: forget its contract, tell the host.
+    fn changed(&self, name: &str) {
+        self.described
+            .lock()
+            .expect("the described-script memo")
+            .remove(name);
+        if let Some(hook) = &self.on_change {
+            hook(name);
+        }
+    }
 }
 
 /// Bind every script resource.
@@ -72,10 +120,10 @@ impl SpaceConfig {
 /// matches), and `urn:script:{name}`'s template captures the rest of an IRI, so the two
 /// exact names go first and the bare script last. A name cannot contain `:`, so
 /// `urn:script:x:compiled` can only be the compiled form of `x`.
-pub fn space(config: SpaceConfig) -> EndpointSpace {
+pub fn space(config: SpaceConfig) -> ScriptSpace {
     let shared = Arc::new(config);
     let template = |t: &str| UriTemplate::parse(t).expect("a constant template");
-    EndpointSpace::new()
+    let inner = EndpointSpace::new()
         .bind(Exact::new(EVAL_IRI), EvalEndpoint)
         .bind(
             Exact::new(CATALOG_IRI),
@@ -113,7 +161,13 @@ pub fn space(config: SpaceConfig) -> EndpointSpace {
                 shared: Arc::clone(&shared),
             },
         )
-        .bind(template("urn:script:{name}"), ScriptEndpoint { shared })
+        .bind(
+            template("urn:script:{name}"),
+            ScriptEndpoint {
+                shared: Arc::clone(&shared),
+            },
+        );
+    ScriptSpace { inner, shared }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -392,7 +446,10 @@ impl Endpoint for ScriptEndpoint {
                     )
                     .input(
                         ArgSpec::new("language")
-                            .summary("The script's language. Lisp only in this version.")
+                            .summary(
+                                "The script's language: `lisp`, or `sparql` (a query or \
+                                 update, when the host mounts a SPARQL door).",
+                            )
                             .class(XSD_STRING)
                             .one_of(Language::ALL.map(Language::as_str))
                             .default_value("lisp")
@@ -402,8 +459,10 @@ impl Endpoint for ScriptEndpoint {
                         ArgSpec::new("requires")
                             .summary(
                                 "Whitespace-separated `urn:cap:` grants the script needs to \
-                                 run. The language's capability is added. Exact grants \
-                                 only: no wildcards, no exclusions.",
+                                 run. Lisp: the language's capability is added; exact grants \
+                                 only, no wildcards, no exclusions. SPARQL: DERIVED from the \
+                                 graphs the text names, so omit it; one that says anything \
+                                 else is refused, naming the derived set.",
                             )
                             .class(XSD_STRING)
                             .optional(),
@@ -464,11 +523,17 @@ fn publish(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Result<Rep
         .map(Language::parse)
         .transpose()?
         .unwrap_or(Language::Lisp);
-    let mut requires = optional(inv, "requires")?
-        .map(authority::parse_requires)
-        .transpose()?
-        .unwrap_or_default();
-    requires.insert(language.capability().to_string());
+    let requires = match language {
+        Language::Lisp => {
+            let mut requires = optional(inv, "requires")?
+                .map(authority::parse_requires)
+                .transpose()?
+                .unwrap_or_default();
+            requires.insert(CAP_LISP.to_string());
+            requires
+        }
+        Language::Sparql => derived_requires(inv, shared, source)?,
+    };
     let public = optional(inv, "public")?
         .map(|v| parse_bool("public", v))
         .transpose()?
@@ -539,7 +604,57 @@ fn publish(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Result<Rep
         history,
     };
     shared.backend.swap_head(name, current.as_ref(), &head)?;
+    shared.changed(name);
     Ok(plain(format!("{}\n", name::version_iri(name, &digest))))
+}
+
+/// A SPARQL script's authority: DERIVED from the graphs its text names, never declared.
+/// A `requires=` is accepted only when it says exactly the same thing, and refused naming
+/// the derived set when it does not, so an author can neither under- nor over-declare.
+fn derived_requires(
+    inv: &Invocation<'_>,
+    shared: &SpaceConfig,
+    source: &str,
+) -> Result<BTreeSet<String>> {
+    let door = door(shared).map_err(|_| Error::InvalidArgument {
+        name: "language".to_string(),
+        detail: "this host takes no SPARQL scripts: it mounts no SPARQL door".to_string(),
+    })?;
+    let derived = sparql::analyze(source, door)?.requires();
+    if let Some(said) = optional(inv, "requires")? {
+        let said: BTreeSet<String> = said.split_whitespace().map(str::to_string).collect();
+        if said != derived {
+            return Err(Error::InvalidArgument {
+                name: "requires".to_string(),
+                detail: format!(
+                    "a SPARQL script's authority is derived from the graphs its text names, \
+                     not declared, and this one derives {}; the `requires` given says {}. \
+                     Omit `requires`",
+                    listed(&derived),
+                    listed(&said)
+                ),
+            });
+        }
+    }
+    Ok(derived)
+}
+
+fn listed(scopes: &BTreeSet<String>) -> String {
+    if scopes.is_empty() {
+        "nothing".to_string()
+    } else {
+        scopes.iter().cloned().collect::<Vec<_>>().join(" ")
+    }
+}
+
+fn door(shared: &SpaceConfig) -> Result<&SparqlDoor> {
+    shared.sparql.as_ref().ok_or_else(|| {
+        Error::Endpoint(
+            "this host mounts no SPARQL door (`SpaceConfig::sparql`), so it cannot run a \
+             SPARQL script"
+                .to_string(),
+        )
+    })
 }
 
 fn retire(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Result<Representation> {
@@ -562,6 +677,7 @@ fn retire(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Result<Repr
         at,
     });
     shared.backend.swap_head(name, Some(&current), &head)?;
+    shared.changed(name);
     Ok(plain(format!("retired {iri}\n")))
 }
 
@@ -658,7 +774,8 @@ impl Endpoint for VersionEndpoint {
 /// The compiled form: everything a run needs, in one cacheable resource hung from the
 /// script's thread. For Lisp the "compilation" is preparation — the evaluator offers no
 /// separate compile step to cache — so this is the program and the authority it runs
-/// under, bound to the version they came from.
+/// under, bound to the version they came from. For SPARQL it adds what the parsed text
+/// says: its form, its parameters and the graphs it names ([`Analysis`]).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Prepared {
     /// [`SCHEMA`].
@@ -671,11 +788,11 @@ pub struct Prepared {
     pub version: String,
     /// Its language.
     pub language: Language,
-    /// The evaluator a run issues to.
+    /// The door a run issues to: `urn:lisp:eval`, or the host's SPARQL door for this form.
     pub evaluator: String,
     /// The program.
     pub program: String,
-    /// What it declares.
+    /// What it declares (for SPARQL: what its text derives).
     pub requires: BTreeSet<String>,
     /// What its publisher held of that.
     pub granted: BTreeSet<String>,
@@ -685,6 +802,9 @@ pub struct Prepared {
     pub public: bool,
     /// Its state.
     pub state: State,
+    /// For a SPARQL script: its form, parameters and graphs, read from the parsed text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparql: Option<Analysis>,
 }
 
 struct CompiledEndpoint {
@@ -710,18 +830,27 @@ impl Endpoint for CompiledEndpoint {
             &name,
         )?;
         let version = head_version(&self.shared, &head)?;
+        let (evaluator, analysis) = match version.language {
+            Language::Lisp => (LISP_EVAL.to_string(), None),
+            Language::Sparql => {
+                let door = door(&self.shared)?;
+                let analysis = sparql::analyze(&version.source, door)?;
+                (door.query_iri(analysis.form), Some(analysis))
+            }
+        };
         let prepared = Prepared {
             schema: SCHEMA,
             iri: name::part_iri(&name, "compiled"),
             version: head.version.clone(),
             language: version.language,
-            evaluator: version.language.evaluator().to_string(),
+            evaluator,
             program: version.source,
             requires: version.requires,
             granted: head.granted,
             exclusions: head.exclusions,
             public: head.public,
             state: head.state,
+            sparql: analysis,
             name: name.clone(),
         };
         // ★ Hung from the SCRIPT's thread, which every publish and retire cuts (the kernel
@@ -741,9 +870,9 @@ impl Endpoint for CompiledEndpoint {
             .title("A script's compiled form")
             .summary(
                 "The head version prepared for its evaluator, with the authority it runs \
-                 under: cached, and cut whenever the script is republished or retired. \
-                 Readable by a holder of the script's read OR run grant (a run reads its \
-                 program here).",
+                 under (and, for SPARQL, its form, parameters and graphs): cached, and cut \
+                 whenever the script is republished or retired. Readable by a holder of the \
+                 script's read OR run grant (a run reads its program here).",
             )
             .verb(Verb::Meta)
             .action(
@@ -760,13 +889,15 @@ impl Endpoint for CompiledEndpoint {
 // Running: …:result (a read) and …:runs (a write)
 // ---------------------------------------------------------------------------------------
 
+const LISP_EVAL: &str = "urn:lisp:eval";
+
 /// Read the compiled form through the kernel, check the run gate and the state, and
-/// compute what the run may keep of the runner's capability.
+/// compute what the run may keep of the runner's capability (and under which ceiling).
 async fn prepare_run(
     inv: &Invocation<'_>,
     shared: &SpaceConfig,
     name: &str,
-) -> Result<(Prepared, BTreeSet<String>)> {
+) -> Result<(Prepared, BTreeSet<String>, Ceiling)> {
     // Composed, not reached into: the run is a reader of its own compiled form, so the
     // compiled form's thread (and the script's, through it) lands on the result.
     let compiled = inv
@@ -820,13 +951,12 @@ async fn prepare_run(
         &prepared.exclusions,
         &ceiling,
     );
-    Ok((prepared, keep))
+    Ok((prepared, keep, ceiling))
 }
 
-/// The evaluator sub-request: `in` is the program, `data` what it reads with `(input)`.
-fn eval_request(language: Language, program: &str, data: Option<&str>) -> Result<Request> {
-    let mut request =
-        Request::new(Verb::Source, iri(language.evaluator())?).with_arg("in", inline(program));
+/// The Lisp evaluator sub-request: `in` is the program, `data` what it reads with `(input)`.
+fn lisp_request(program: &str, data: Option<&str>) -> Result<Request> {
+    let mut request = Request::new(Verb::Source, iri(LISP_EVAL)?).with_arg("in", inline(program));
     if let Some(data) = data {
         request = request.with_arg("data", inline(data));
     }
@@ -835,6 +965,307 @@ fn eval_request(language: Language, program: &str, data: Option<&str>) -> Result
 
 /// `run_args`: the description of the run's input, shared by both run doors.
 const DATA_SUMMARY: &str = "Optional data the script reads with `(input)` — data, never code.";
+
+/// Which door a run came through.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Door {
+    /// `…:result`: a read, answered with the script's value.
+    Result,
+    /// `…:runs`: a write, recorded.
+    Runs,
+}
+
+/// What a run issues, and exactly the scopes it issues it under (before the runner's own
+/// capability is attenuated to them).
+struct Planned {
+    request: Request,
+    keep: BTreeSet<String>,
+}
+
+/// The run's sub-request, for whichever language the script is in.
+async fn plan(
+    inv: &Invocation<'_>,
+    shared: &SpaceConfig,
+    prepared: &Prepared,
+    keep: BTreeSet<String>,
+    ceiling: &Ceiling,
+    through: Door,
+) -> Result<Planned> {
+    match prepared.language {
+        Language::Lisp => {
+            let data = optional(
+                inv,
+                match through {
+                    Door::Result => "data",
+                    Door::Runs => "content",
+                },
+            )?;
+            Ok(Planned {
+                request: lisp_request(&prepared.program, data)?,
+                keep,
+            })
+        }
+        Language::Sparql => plan_sparql(inv, shared, prepared, keep, ceiling, through).await,
+    }
+}
+
+/// A SPARQL run: bind the parameters into the parsed query, work out its dataset and the
+/// exact store grants it needs, and address the host's store door for its form.
+///
+/// ★ **The dataset is never wider than the authority.** The graphs the text fixes need
+/// their grants in the run's capability (the store refuses the whole read, naming the
+/// grant, when one is missing). A graph only the run decides (`GRAPH ?g`, or a parameter
+/// naming a graph) is admitted only under the derived family, and only when the
+/// publisher held it (or was root), the host's ceiling allows it AND the runner holds it:
+/// that set is "the caller's readable union", computed here per run and never more.
+async fn plan_sparql(
+    inv: &Invocation<'_>,
+    shared: &SpaceConfig,
+    prepared: &Prepared,
+    mut keep: BTreeSet<String>,
+    ceiling: &Ceiling,
+    through: Door,
+) -> Result<Planned> {
+    let name = &prepared.name;
+    let door = door(shared)?;
+    let analysis = prepared.sparql.as_ref().ok_or_else(|| {
+        Error::Endpoint(format!(
+            "urn:script:{name}:compiled carries no SPARQL analysis"
+        ))
+    })?;
+    if through == Door::Result && !analysis.form.is_read() {
+        return Err(Error::InvalidArgument {
+            name: "name".to_string(),
+            detail: format!(
+                "urn:script:{name} is a SPARQL UPDATE, which is a write: run it with a Sink to \
+                 urn:script:{name}:runs"
+            ),
+        });
+    }
+    let values = parameter_values(inv, name, &analysis.parameters, through)?;
+    let face = sparql_face(inv, analysis.form)?;
+    let bound = sparql::bind(&prepared.program, door, &values)?;
+
+    let runner = inv.capability;
+    // The root publisher's marker: expanded below into exact grants, never attenuated as
+    // it stands (attenuation keeps grants by exact name).
+    let root_marker = keep.remove(CAP_READ_GRAPH);
+    let family = prepared.requires.contains(CAP_READ_GRAPH);
+    let by_family = |scope: &str, keep: &BTreeSet<String>| {
+        family
+            && runner.allows(scope)
+            && if root_marker {
+                ceiling.allows(scope)
+            } else {
+                keep.contains(scope)
+            }
+    };
+
+    if bound.form == Form::Update {
+        // An update's one graph is fixed by its text (a parameter cannot name it), so its
+        // grants are exactly the derived ones, already in `keep`.
+        let graph = bound.graphs.iter().next().cloned().ok_or_else(|| {
+            Error::Endpoint(format!("urn:script:{name} names no graph to update"))
+        })?;
+        let request = Request::new(Verb::Sink, iri(&door.query_iri(Form::Update))?)
+            .with_arg("content", inline(&bound.text))
+            .with_arg("graph", inline(&graph));
+        return Ok(Planned { request, keep });
+    }
+
+    let mut extra = BTreeSet::new();
+    for graph in &bound.graphs {
+        let scope = sparql::cap_read_graph(graph);
+        if !keep.contains(&scope) && by_family(&scope, &keep) {
+            extra.insert(scope);
+        }
+    }
+    let mut dataset = bound.graphs.clone();
+    if bound.any_graph {
+        if !family {
+            return Err(Error::Endpoint(format!(
+                "urn:script:{name} reads a variable graph but its record derives no \
+                 `{CAP_READ_GRAPH}`; republish it"
+            )));
+        }
+        let under = |scopes: &mut dyn Iterator<Item = &String>| -> BTreeSet<String> {
+            scopes
+                .filter_map(|s| s.strip_prefix(sparql::READ_GRAPH_PREFIX))
+                .filter(|g| !g.starts_with('-') && !g.ends_with('*'))
+                .map(str::to_string)
+                .collect()
+        };
+        let candidates = if !root_marker {
+            under(&mut keep.iter())
+        } else if let Some(held) = runner.scopes() {
+            under(&mut held.iter())
+        } else {
+            // Root ran a script a root published: the readable union is every graph the
+            // store holds, listed by the store itself under the broad read the runner holds.
+            let listing = inv
+                .issue_attenuated(
+                    Request::new(Verb::Source, iri(&door.graphs_iri())?),
+                    [sparql::CAP_STORE_READ.to_string()],
+                )
+                .await?;
+            String::from_utf8_lossy(&listing.bytes)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        for graph in candidates {
+            let scope = sparql::cap_read_graph(&graph);
+            if keep.contains(&scope) && runner.allows(&scope) || by_family(&scope, &keep) {
+                extra.insert(scope);
+                dataset.insert(graph);
+            }
+        }
+    }
+    if dataset.is_empty() {
+        return Err(Error::Denied(format!(
+            "urn:script:{name} reads the caller's readable graphs, and this run may read none: \
+             it needs `{}` grants the publisher held, the host allows and the runner holds",
+            sparql::READ_GRAPH_PREFIX
+        )));
+    }
+    keep.extend(extra);
+    let graphs = dataset.into_iter().collect::<Vec<_>>().join(" ");
+    let request = Request::new(Verb::Source, iri(&door.query_iri(bound.form))?)
+        .with_arg("query", inline(&bound.text))
+        .with_arg("graph", inline(&graphs))
+        .with_arg("as", inline(face));
+    Ok(Planned { request, keep })
+}
+
+/// The face a SPARQL run answers in: `as=`, one its form can serve, or the form's default.
+/// Refused, never substituted.
+fn sparql_face(inv: &Invocation<'_>, form: Form) -> Result<&'static str> {
+    let faces = form.faces();
+    match optional(inv, "as")? {
+        None => Ok(faces[0]),
+        Some(asked) => {
+            let bare = asked.split(';').next().unwrap_or(asked).trim();
+            faces
+                .iter()
+                .find(|f| **f == bare)
+                .copied()
+                .ok_or_else(|| Error::InvalidArgument {
+                    name: "as".to_string(),
+                    detail: format!(
+                        "`{asked}` is not a face a SPARQL {} answers in; one of {}",
+                        form.as_str().to_uppercase(),
+                        faces.join(", ")
+                    ),
+                })
+        }
+    }
+}
+
+/// The run's parameter values, each checked against its declared type.
+///
+/// Named arguments, or (through `…:runs`) a JSON object piped as `content`. A missing
+/// required parameter is `MissingArgument`; a value that is not of its type, a parameter
+/// given both ways, and an argument the script does not declare are `InvalidArgument`: a
+/// binding the query does not mention is refused, never ignored, so a filter you thought
+/// was applied can never silently not be.
+fn parameter_values(
+    inv: &Invocation<'_>,
+    name: &str,
+    parameters: &[Parameter],
+    through: Door,
+) -> Result<BTreeMap<String, Value>> {
+    let declared = || {
+        if parameters.is_empty() {
+            "it declares none".to_string()
+        } else {
+            format!(
+                "its parameters are {}",
+                parameters
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    };
+    for arg in inv.request.args.keys() {
+        let known = arg == "as"
+            || (through == Door::Runs && arg == "content")
+            || parameters.iter().any(|p| &p.name == arg);
+        if !known {
+            return Err(Error::InvalidArgument {
+                name: arg.clone(),
+                detail: format!("is not a parameter of urn:script:{name}; {}", declared()),
+            });
+        }
+    }
+    let mut piped: BTreeMap<String, String> = BTreeMap::new();
+    if through == Door::Runs {
+        if let Some(content) = optional(inv, "content")? {
+            let object: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(content).map_err(|e| Error::InvalidArgument {
+                    name: "content".to_string(),
+                    detail: format!(
+                        "a SPARQL script's piped content is its parameters as one JSON object \
+                         ({e})"
+                    ),
+                })?;
+            for (key, value) in object {
+                let lexical = match value {
+                    serde_json::Value::String(s) => s,
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    other => {
+                        return Err(Error::InvalidArgument {
+                            name: "content".to_string(),
+                            detail: format!(
+                                "`{key}` is {other}; a parameter's value is a string, a number \
+                                 or a boolean"
+                            ),
+                        })
+                    }
+                };
+                piped.insert(key, lexical);
+            }
+        }
+    }
+    let mut values = BTreeMap::new();
+    for parameter in parameters {
+        let named = optional(inv, &parameter.name)?;
+        let lexical = match (named, piped.remove(&parameter.name)) {
+            (Some(_), Some(_)) => {
+                return Err(Error::InvalidArgument {
+                    name: parameter.name.clone(),
+                    detail: "is given both by name and in the piped content".to_string(),
+                })
+            }
+            (Some(value), None) => Some(value.to_string()),
+            (None, Some(value)) => Some(value),
+            (None, None) => parameter.default.clone(),
+        };
+        match lexical {
+            Some(lexical) => {
+                values.insert(parameter.name.clone(), parameter.value(&lexical)?);
+            }
+            None if parameter.required => {
+                return Err(Error::MissingArgument(parameter.name.clone()));
+            }
+            None => {}
+        }
+    }
+    if let Some(stray) = piped.keys().next() {
+        return Err(Error::InvalidArgument {
+            name: "content".to_string(),
+            detail: format!(
+                "`{stray}` is not a parameter of urn:script:{name}; {}",
+                declared()
+            ),
+        });
+    }
+    Ok(values)
+}
 
 struct ResultEndpoint {
     shared: Arc<SpaceConfig>,
@@ -847,15 +1278,18 @@ impl Endpoint for ResultEndpoint {
             return Err(unsupported("script-result", inv.request.verb));
         }
         let name = name::from_bindings(inv)?;
-        let (prepared, keep) = prepare_run(inv, &self.shared, &name).await?;
-        let request = eval_request(prepared.language, &prepared.program, optional(inv, "data")?)?;
+        let (prepared, keep, ceiling) = prepare_run(inv, &self.shared, &name).await?;
+        let planned = plan(inv, &self.shared, &prepared, keep, &ceiling, Door::Result).await?;
         // ★ The ONLY authority a run gets: the runner's own capability, narrowed. There is
         // no form that widens, so a script cannot reach past its runner whatever it says.
-        let answer = inv.issue_attenuated(request, keep).await?;
+        let answer = inv
+            .issue_attenuated(planned.request, planned.keep)
+            .await?;
         // Cacheable as far as this endpoint is concerned; the kernel folds in the
-        // evaluator's expiry (uncacheable unless the program opts in with `(cacheable …)`)
-        // and the compiled form's threads. The authority thread is the host's to cut when
-        // it changes this script's ceiling.
+        // evaluator's expiry (a Lisp program is uncacheable unless it opts in with
+        // `(cacheable …)`; a query is as cacheable as the store's answer, which hangs from
+        // the store's write threads) and the compiled form's threads. The authority thread
+        // is the host's to cut when it changes this script's ceiling.
         Ok(Representation::new(answer.repr_type, answer.bytes)
             .cacheable()
             .depends_on(name::authority_thread(&name)))
@@ -874,7 +1308,8 @@ impl Endpoint for ResultEndpoint {
                  the host allows it — never more. Cacheable exactly as far as the script's \
                  own sub-requests are (a Lisp program opts in with `(cacheable …)`), and \
                  recomputed when the script is republished. No run record: a cached answer \
-                 runs nothing; record a run with `…:runs`.",
+                 runs nothing; record a run with `…:runs`. A published SPARQL script is \
+                 its own entry, with its parameters as arguments.",
             )
             .verb(Verb::Meta)
             .action(
@@ -901,13 +1336,11 @@ impl Endpoint for RunsEndpoint {
         }
         let name = name::from_bindings(inv)?;
         let shared = &self.shared;
-        let (prepared, keep) = prepare_run(inv, shared, &name).await?;
-        let request = eval_request(
-            prepared.language,
-            &prepared.program,
-            optional(inv, "content")?,
-        )?;
-        let runs_as = inv.capability.attenuate(keep.iter().cloned());
+        let (prepared, keep, ceiling) = prepare_run(inv, shared, &name).await?;
+        // A caller's mistake (a missing or ill-typed parameter) is refused here, before a
+        // run is recorded: nothing ran.
+        let planned = plan(inv, shared, &prepared, keep, &ceiling, Door::Runs).await?;
+        let runs_as = inv.capability.attenuate(planned.keep.iter().cloned());
         let mut run = Run {
             schema: SCHEMA,
             name: name.clone(),
@@ -923,7 +1356,7 @@ impl Endpoint for RunsEndpoint {
             trace_span: inv.trace_span(),
         };
         run.id = shared.backend.start_run(&name, &run)?;
-        let answer = inv.issue_attenuated(request, keep).await;
+        let answer = inv.issue_attenuated(planned.request, planned.keep).await;
         run.ended = inv.now().map(|t| t.as_millis());
         match answer {
             Ok(repr) => {
@@ -959,7 +1392,8 @@ impl Endpoint for RunsEndpoint {
                 "Run the script for its EFFECTS and record the run: who (as the host \
                  stamped it), which version, under exactly what capability, when, and the \
                  outcome. Answers the run's IRI; a run that fails is recorded too, and its \
-                 error names the record.",
+                 error names the record. A published SPARQL script is its own entry, with \
+                 its parameters as arguments.",
             )
             .verb(Verb::Meta)
             .action(
@@ -971,6 +1405,268 @@ impl Endpoint for RunsEndpoint {
                     .requires(CAP_RUN)
                     .requires(CAP_LISP),
             )
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// A published SPARQL script's own contract, and the space that offers it
+// ---------------------------------------------------------------------------------------
+
+/// A published SPARQL script's own endpoints: `…:result` (a query only) and `…:runs`, each
+/// the template's endpoint behind the script's OWN description.
+#[derive(Clone)]
+struct PerScript {
+    result: Option<Arc<dyn Endpoint>>,
+    runs: Arc<dyn Endpoint>,
+}
+
+/// The template's endpoint, behind one script's contract.
+///
+/// ★ **Why a script is its own entry.** A description is the contract the engine routes
+/// arguments by, selection matches on, MCP projects and the Emacs aliases are generated
+/// from, and the kernel answers it per ENDPOINT, never per IRI. A query's parameters are
+/// real arguments only if they are in a description, so each published query gets one.
+/// It is built once per head (the kernel memoizes floors by this allocation) and dropped
+/// by the next publish or retire.
+struct Described {
+    inner: Arc<dyn Endpoint>,
+    id: String,
+    description: Description,
+}
+
+#[async_trait]
+impl Endpoint for Described {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        self.inner.invoke(inv).await
+    }
+
+    fn name(&self) -> &str {
+        &self.id
+    }
+
+    fn describe(&self) -> Description {
+        self.description.clone()
+    }
+}
+
+/// The script resources as a space: [`space`]'s bindings, plus each published SPARQL
+/// script as its own `…:result` and `…:runs` entry, carrying its parameters.
+pub struct ScriptSpace {
+    inner: EndpointSpace,
+    shared: Arc<SpaceConfig>,
+}
+
+impl ScriptSpace {
+    /// The script's own endpoints, when it is a published SPARQL script this host can run.
+    fn per_script(&self, name: &str) -> Option<PerScript> {
+        let shared = &self.shared;
+        if let Some(known) = shared
+            .described
+            .lock()
+            .expect("the described-script memo")
+            .get(name)
+        {
+            return known.clone();
+        }
+        let built = self.build(name);
+        shared
+            .described
+            .lock()
+            .expect("the described-script memo")
+            .insert(name.to_string(), built.clone());
+        built
+    }
+
+    fn build(&self, name: &str) -> Option<PerScript> {
+        let shared = &self.shared;
+        let door = shared.sparql.as_ref()?;
+        let head = shared.backend.head(name).ok()??;
+        if head.state != State::Published {
+            return None;
+        }
+        let version = shared.backend.version(name, &head.version).ok()??;
+        if version.language != Language::Sparql {
+            return None;
+        }
+        let analysis = sparql::analyze(&version.source, door).ok()?;
+        let about = about(&version.source);
+        // The run gate, as the kernel can check it before the endpoint is entered: the
+        // script's own grant, or for a public one the family (its own grant OR the
+        // public one, which `requires` cannot say any other way: it is all-of).
+        let gate = if head.public {
+            CAP_RUN.to_string()
+        } else {
+            cap_run(name)
+        };
+        let params = |mut spec: ActionSpec| {
+            for p in &analysis.parameters {
+                let mut arg = ArgSpec::new(p.name.clone())
+                    .summary(p.summary.clone().unwrap_or_else(|| {
+                        format!("The value of ?{} in the query.", p.name)
+                    }))
+                    .class(p.kind.iri().to_string());
+                if let Some(default) = &p.default {
+                    arg = arg.default_value(default.clone()).optional();
+                } else if !p.required {
+                    arg = arg.optional();
+                }
+                spec = spec.input(arg);
+            }
+            spec = spec.requires(gate.clone());
+            for scope in &version.requires {
+                spec = spec.requires(scope.clone());
+            }
+            spec
+        };
+        let form = analysis.form;
+        let faces = form.faces();
+        let as_arg = || {
+            ArgSpec::new("as")
+                .summary(format!(
+                    "The face: one of {}. Any other is refused, never substituted.",
+                    faces.join(", ")
+                ))
+                .class(XSD_STRING)
+                .one_of(faces.iter().copied())
+                .default_value(faces[0])
+                .optional()
+        };
+        let result = form.is_read().then(|| {
+            let id = format!("script-{name}-result");
+            let mut spec = params(ActionSpec::new(Verb::Source))
+                .summary(format!("Run the query {name} and answer its result."))
+                .input(as_arg());
+            for face in faces {
+                spec = spec.output(*face);
+            }
+            Arc::new(Described {
+                inner: Arc::new(ResultEndpoint {
+                    shared: Arc::clone(shared),
+                }),
+                description: Description::new(id.clone())
+                    .title(format!("{name}: a SPARQL {}", form.as_str().to_uppercase()))
+                    .summary(format!(
+                        "{about}Runs as a READ under the runner's capability narrowed to the \
+                         graphs the query names; cached as the store's answer is, and \
+                         recomputed after a write to the store or a republish."
+                    ))
+                    .verb(Verb::Meta)
+                    .action(spec),
+                id,
+            }) as Arc<dyn Endpoint>
+        });
+        let id = format!("script-{name}-runs");
+        let mut spec = params(ActionSpec::new(Verb::Sink))
+            .summary(format!(
+                "Run {name} for its effects and record the run; answers the run's IRI."
+            ))
+            .input(
+                ArgSpec::new("content")
+                    .summary(
+                        "The parameters as one JSON object, for a pipe (a parameter given \
+                         both here and by name is refused).",
+                    )
+                    .class(XSD_STRING)
+                    .optional(),
+            )
+            .output(PLAIN);
+        if form.is_read() {
+            spec = spec.input(as_arg());
+        }
+        let runs = Arc::new(Described {
+            inner: Arc::new(RunsEndpoint {
+                shared: Arc::clone(shared),
+            }),
+            description: Description::new(id.clone())
+                .title(format!("{name}: runs"))
+                .summary(format!(
+                    "{about}Each run is recorded: who, which version, under exactly what \
+                     capability, when, and the outcome."
+                ))
+                .verb(Verb::Meta)
+                .action(spec),
+            id,
+        }) as Arc<dyn Endpoint>;
+        Some(PerScript { result, runs })
+    }
+}
+
+/// A script's own words for the catalog: its leading comment lines that declare nothing.
+fn about(source: &str) -> String {
+    let mut lines = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        let Some(body) = trimmed.strip_prefix('#') else {
+            if trimmed.is_empty() {
+                continue;
+            }
+            break;
+        };
+        let body = body.trim();
+        if !body.is_empty() && !body.starts_with("@param") {
+            lines.push(body);
+        }
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", lines.join(" "))
+    }
+}
+
+impl Space for ScriptSpace {
+    fn resolve(&self, request: &Request, scope: &Scope) -> Resolution {
+        let resolution = self.inner.resolve(request, scope);
+        let (name, part) = match &resolution {
+            Resolution::Hit(hit) => {
+                let part = match hit.endpoint.name() {
+                    "script-result" => Door::Result,
+                    "script-runs" => Door::Runs,
+                    _ => return resolution,
+                };
+                match hit.bindings.get("name") {
+                    Some(name) if name::validate(name).is_ok() => (name.to_string(), part),
+                    _ => return resolution,
+                }
+            }
+            Resolution::Miss => return resolution,
+        };
+        let own = self.per_script(&name).and_then(|per| match part {
+            Door::Result => per.result,
+            Door::Runs => Some(per.runs),
+        });
+        match own {
+            Some(endpoint) => resolution.map_endpoint(|_| endpoint),
+            None => resolution,
+        }
+    }
+
+    fn entries(&self) -> Option<Vec<SpaceEntry>> {
+        let mut entries = self.inner.entries().unwrap_or_default();
+        for name in self.shared.backend.names().unwrap_or_default() {
+            let Some(per) = self.per_script(&name) else {
+                continue;
+            };
+            if let Some(result) = &per.result {
+                entries.push(SpaceEntry::new(
+                    name::part_iri(&name, "result"),
+                    result.name(),
+                ));
+            }
+            entries.push(SpaceEntry::new(
+                name::part_iri(&name, "runs"),
+                per.runs.name(),
+            ));
+        }
+        Some(entries)
+    }
+
+    fn id(&self) -> Option<Iri> {
+        self.inner.id()
+    }
+
+    fn topology(&self) -> Topology {
+        self.inner.topology()
     }
 }
 
@@ -1120,6 +1816,15 @@ impl Endpoint for EvalEndpoint {
             .map(Language::parse)
             .transpose()?
             .unwrap_or(Language::Lisp);
+        if language == Language::Sparql {
+            return Err(Error::InvalidArgument {
+                name: "language".to_string(),
+                detail: "SPARQL through urn:script:eval is the SPARQL Protocol face (ledger \
+                         #955), not in this version: publish the query as a script and read \
+                         its `…:result`"
+                    .to_string(),
+            });
+        }
         if let Some(save) = optional(inv, "save")? {
             let save = save.trim();
             name::validate(save)?;
@@ -1138,7 +1843,7 @@ impl Endpoint for EvalEndpoint {
         // ★ The caller's OWN capability, unchanged: `issue`, not `issue_attenuated`, and
         // nothing that could add to it exists.
         let answer = inv
-            .issue(eval_request(language, code, optional(inv, "data")?)?)
+            .issue(lisp_request(code, optional(inv, "data")?)?)
             .await?;
         Ok(Representation::new(answer.repr_type, answer.bytes))
     }
@@ -1166,7 +1871,10 @@ impl Endpoint for EvalEndpoint {
                     )
                     .input(
                         ArgSpec::new("language")
-                            .summary("The code's language. Lisp only in this version.")
+                            .summary(
+                                "The code's language: `lisp` (SPARQL here is the Protocol \
+                                 face, not in this version).",
+                            )
                             .class(XSD_STRING)
                             .one_of(Language::ALL.map(Language::as_str))
                             .default_value("lisp")

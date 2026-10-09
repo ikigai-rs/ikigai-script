@@ -71,8 +71,10 @@
 pub mod authority;
 pub mod backend;
 pub mod endpoints;
+pub mod limits;
 pub mod model;
 pub mod name;
+pub mod sparql;
 
 pub use backend::{Backend, DirBackend, MemoryBackend};
 pub use endpoints::{space, Catalog, CatalogEntry, LastRun, Prepared, SpaceConfig};
