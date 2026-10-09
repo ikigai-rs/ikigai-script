@@ -1497,6 +1497,8 @@ impl ScriptSpace {
     /// The script's own endpoints, when it is a SPARQL script this host can run.
     fn per_script(&self, name: &str) -> Option<PerScript> {
         let shared = &self.shared;
+        // A host without a SPARQL door has no per-script contracts, and pays nothing here.
+        shared.sparql.as_ref()?;
         if let Some(known) = shared
             .described
             .lock()
@@ -1506,11 +1508,15 @@ impl ScriptSpace {
             return known.clone();
         }
         let built = self.build(name);
-        shared
-            .described
-            .lock()
-            .expect("the described-script memo")
-            .insert(name.to_string(), built.clone());
+        // ⚠ Remember only scripts that exist: a name nobody published is a miss every
+        // time, never an entry, so resolving arbitrary names cannot grow this map.
+        if built.is_some() || matches!(shared.backend.head(name), Ok(Some(_))) {
+            shared
+                .described
+                .lock()
+                .expect("the described-script memo")
+                .insert(name.to_string(), built.clone());
+        }
         built
     }
 
