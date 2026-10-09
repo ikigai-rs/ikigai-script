@@ -200,3 +200,139 @@ pub fn denied(result: std::result::Result<String, Error>) -> String {
         other => panic!("expected a typed Denied, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// SPARQL: a host with the store, bound as a host binds it
+// ---------------------------------------------------------------------------------------
+
+/// An endpoint behind a counter: how many times the store EVALUATED something is the
+/// question the caching tests ask.
+pub struct CountedDyn {
+    inner: Arc<dyn Endpoint>,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Endpoint for CountedDyn {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.invoke(inv).await
+    }
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn describe(&self) -> Description {
+        self.inner.describe()
+    }
+}
+
+/// `ikigai-store`'s space, with every evaluation of a graph-scoped QUERY counted.
+pub struct CountingStore {
+    inner: EndpointSpace,
+    queries: Arc<AtomicUsize>,
+}
+
+impl Space for CountingStore {
+    fn resolve(&self, request: &Request, scope: &ikigai_core::Scope) -> ikigai_core::Resolution {
+        let resolution = self.inner.resolve(request, scope);
+        let target = request.target.as_str();
+        if target.starts_with("urn:iki:store:graph-") && target != "urn:iki:store:graph-update" {
+            let calls = Arc::clone(&self.queries);
+            resolution.map_endpoint(|inner| Arc::new(CountedDyn { inner, calls }))
+        } else {
+            resolution
+        }
+    }
+    fn entries(&self) -> Option<Vec<ikigai_core::SpaceEntry>> {
+        self.inner.entries()
+    }
+}
+
+/// A host whose scripts may be SPARQL, run against an in-memory `ikigai-store`.
+pub struct SparqlHost {
+    pub kernel: Arc<Kernel>,
+    pub backend: Arc<dyn Backend>,
+    queries: Arc<AtomicUsize>,
+    /// Every name the space reported changed, in order.
+    pub changed: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl SparqlHost {
+    /// How many times the store has evaluated a query for a script.
+    pub fn queries(&self) -> usize {
+        self.queries.load(Ordering::SeqCst)
+    }
+}
+
+/// A SPARQL host: scripts (with `door`), the store, Lisp, and the probes. The space's
+/// change hook is wired as a host wires it: to a cut of `urn:kernel:bindings`.
+pub fn sparql_host_with(
+    door: ikigai_script::sparql::SparqlDoor,
+    ceiling: CeilingPolicy,
+    principal: Option<PrincipalStamper>,
+) -> SparqlHost {
+    let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+    let kernel_cell: Arc<std::sync::OnceLock<std::sync::Weak<Kernel>>> =
+        Arc::new(std::sync::OnceLock::new());
+    let changed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hook: ikigai_script::endpoints::ChangeHook = {
+        let cell = Arc::clone(&kernel_cell);
+        let changed = Arc::clone(&changed);
+        Arc::new(move |name: &str| {
+            changed.lock().unwrap().push(name.to_string());
+            if let Some(kernel) = cell.get().and_then(std::sync::Weak::upgrade) {
+                kernel.cut(ikigai_core::BINDINGS_THREAD);
+            }
+        })
+    };
+    let mut config = SpaceConfig::new(Arc::clone(&backend), ceiling)
+        .sparql(door)
+        .on_change(hook);
+    if let Some(principal) = principal {
+        config = config.principal(principal);
+    }
+    let queries = Arc::new(AtomicUsize::new(0));
+    let store = CountingStore {
+        inner: ikigai_store::space(ikigai_store::DurableStore::in_memory().expect("a store")),
+        queries: Arc::clone(&queries),
+    };
+    let lisp = EndpointSpace::new().bind(Exact::new("urn:lisp:eval"), ikigai_lisp::eval());
+    let root = Fallback::new(vec![
+        Arc::new(ikigai_script::space(config)) as Arc<dyn Space>,
+        Arc::new(store) as Arc<dyn Space>,
+        Arc::new(lisp) as Arc<dyn Space>,
+        Arc::new(probes()) as Arc<dyn Space>,
+    ]);
+    let kernel = Arc::new(
+        Kernel::with_meta_renderer(Arc::new(root), Arc::new(ikigai_vocab::TurtleRenderer))
+            .with_clock(Arc::new(TickingClock::default())),
+    );
+    kernel_cell
+        .set(Arc::downgrade(&kernel))
+        .unwrap_or_else(|_| unreachable!("set once"));
+    SparqlHost {
+        kernel,
+        backend,
+        queries,
+        changed,
+    }
+}
+
+/// A SPARQL host over `urn:iki:store:`, no ceiling, unstamped.
+pub fn sparql_host() -> SparqlHost {
+    sparql_host_with(
+        ikigai_script::sparql::SparqlDoor::store(),
+        ikigai_script::authority::same_for_all(Ceiling::unbounded()),
+        None,
+    )
+}
+
+/// Write `update` straight to the store under root: the host's own data, not a script.
+pub fn seed(kernel: &Kernel, update: &str) {
+    ok(
+        kernel,
+        Verb::Sink,
+        "urn:iki:store:update",
+        &[("content", update)],
+    );
+}

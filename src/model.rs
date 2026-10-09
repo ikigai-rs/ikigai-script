@@ -14,22 +14,27 @@ use crate::authority::CAP_LISP;
 /// The version of every JSON shape this crate writes.
 pub const SCHEMA: u32 = 1;
 
-/// The languages a script can be written in. Lisp only in this phase.
+/// The languages a script can be written in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
     /// Steel Scheme, evaluated by `ikigai-lisp` at `urn:lisp:eval`.
     Lisp,
+    /// A SPARQL query or update, evaluated by the host's store through its graph-scoped
+    /// doors (see [`crate::sparql`]). Its form, parameters and authority are read from the
+    /// parsed text.
+    Sparql,
 }
 
 impl Language {
     /// Every language, in the order `language=` offers them.
-    pub const ALL: [Language; 1] = [Language::Lisp];
+    pub const ALL: [Language; 2] = [Language::Lisp, Language::Sparql];
 
     /// The word `language=` takes and every face shows.
     pub fn as_str(self) -> &'static str {
         match self {
             Language::Lisp => "lisp",
+            Language::Sparql => "sparql",
         }
     }
 
@@ -37,27 +42,33 @@ impl Language {
     pub fn parse(text: &str) -> Result<Language> {
         match text.trim() {
             "lisp" => Ok(Language::Lisp),
+            "sparql" => Ok(Language::Sparql),
             other => Err(Error::InvalidArgument {
                 name: "language".to_string(),
-                detail: format!("`{other}` is not a script language here; only `lisp`"),
+                detail: format!("`{other}` is not a script language here; `lisp` or `sparql`"),
             }),
         }
     }
 
-    /// The evaluator a run issues its sub-request to: the language is a resource, so this
-    /// crate links no interpreter.
-    pub fn evaluator(self) -> &'static str {
+    /// The evaluator a Lisp run issues its sub-request to: the language is a resource, so
+    /// this crate links no interpreter. `None` for SPARQL, whose door is the HOST's choice
+    /// ([`crate::sparql::SparqlDoor`]) and depends on the query's form.
+    pub fn evaluator(self) -> Option<&'static str> {
         match self {
-            Language::Lisp => "urn:lisp:eval",
+            Language::Lisp => Some("urn:lisp:eval"),
+            Language::Sparql => None,
         }
     }
 
-    /// The capability the evaluator requires. Every script in this language declares it
-    /// implicitly: evaluating code is itself authority, so a publisher who may not run
-    /// Lisp may not publish Lisp for others to run.
-    pub fn capability(self) -> &'static str {
+    /// The capability the evaluator itself requires, which every script in the language
+    /// declares implicitly: evaluating code is itself authority, so a publisher who may not
+    /// run Lisp may not publish Lisp for others to run. `None` for SPARQL: a query's
+    /// authority is the graphs it names, derived from its text (see
+    /// [`crate::sparql::Analysis::requires`]).
+    pub fn capability(self) -> Option<&'static str> {
         match self {
-            Language::Lisp => CAP_LISP,
+            Language::Lisp => Some(CAP_LISP),
+            Language::Sparql => None,
         }
     }
 }

@@ -318,21 +318,58 @@ pub fn parse_requires(text: &str) -> Result<BTreeSet<String>> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grant {
     /// The declared scopes the publisher held: all of them, since a publish declaring more
-    /// is refused.
+    /// is refused. For a declared FAMILY (`prefix*`, which only a SPARQL script's derived
+    /// authority carries: [`crate::sparql::CAP_READ_GRAPH`]), the publisher's own grants
+    /// under it, each one, or the family itself when the publisher was root.
     pub granted: BTreeSet<String>,
     /// Every exclusion the publisher's capability carried, which every run carries too.
     pub exclusions: BTreeSet<String>,
 }
 
+/// A declared family (`prefix*`): its prefix.
+fn family(scope: &str) -> Option<&str> {
+    scope.strip_suffix('*')
+}
+
 /// Take the publisher's grant for `declared`, or refuse with a typed `Denied` naming what
 /// they do not hold. **No elevation**: a script never runs with more than its publisher
 /// held.
+///
+/// A declared family (`prefix*`) is held when the publisher holds some grant under it,
+/// the kernel's own reading of a family in a `requires`; what is taken is every such
+/// grant, so a run's union is never wider than its publisher's.
 pub fn grant_at_publish(publisher: &Capability, declared: &BTreeSet<String>) -> Result<Grant> {
-    let missing: Vec<&str> = declared
-        .iter()
-        .filter(|scope| !publisher.allows(scope))
-        .map(String::as_str)
-        .collect();
+    let held_under = |prefix: &str| -> Vec<String> {
+        publisher
+            .scopes()
+            .map(|held| {
+                held.iter()
+                    .filter(|s| s.starts_with(prefix) && !is_deny_scope(s))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut granted = BTreeSet::new();
+    let mut missing: Vec<&str> = Vec::new();
+    for scope in declared {
+        match family(scope) {
+            Some(_) if publisher.is_root() => {
+                granted.insert(scope.clone());
+            }
+            Some(prefix) => {
+                let held = held_under(prefix);
+                if held.is_empty() {
+                    missing.push(scope);
+                }
+                granted.extend(held);
+            }
+            None if publisher.allows(scope) => {
+                granted.insert(scope.clone());
+            }
+            None => missing.push(scope),
+        }
+    }
     if !missing.is_empty() {
         return Err(Error::Denied(format!(
             "a script cannot be given more than its publisher holds, and this capability \
@@ -345,7 +382,7 @@ pub fn grant_at_publish(publisher: &Capability, declared: &BTreeSet<String>) -> 
         .map(|held| held.iter().filter(|s| is_deny_scope(s)).cloned().collect())
         .unwrap_or_default();
     Ok(Grant {
-        granted: declared.clone(),
+        granted,
         exclusions,
     })
 }
@@ -353,17 +390,35 @@ pub fn grant_at_publish(publisher: &Capability, declared: &BTreeSet<String>) -> 
 /// The scopes a run asks to keep: `{ s in declared : s in granted and ceiling.allows(s) }`
 /// plus the publisher's and the ceiling's exclusions. The run's capability is the runner's
 /// own [`Capability::attenuate`]d to this set — see the module documentation.
+///
+/// A declared family keeps the publisher's grants under it that the ceiling allows; when
+/// the publisher was root it keeps the family itself, a marker the SPARQL run expands
+/// into exact grants (each checked against the ceiling and the runner) before anything
+/// is attenuated, because attenuation keeps grants by exact name.
 pub fn effective(
     declared: &BTreeSet<String>,
     granted: &BTreeSet<String>,
     exclusions: &BTreeSet<String>,
     ceiling: &Ceiling,
 ) -> BTreeSet<String> {
-    let mut keep: BTreeSet<String> = declared
-        .iter()
-        .filter(|scope| granted.contains(*scope) && ceiling.allows(scope))
-        .cloned()
-        .collect();
+    let mut keep: BTreeSet<String> = BTreeSet::new();
+    for scope in declared {
+        match family(scope) {
+            Some(_) if granted.contains(scope) => {
+                keep.insert(scope.clone());
+            }
+            Some(prefix) => keep.extend(
+                granted
+                    .iter()
+                    .filter(|g| g.starts_with(prefix) && ceiling.allows(g))
+                    .cloned(),
+            ),
+            None if granted.contains(scope) && ceiling.allows(scope) => {
+                keep.insert(scope.clone());
+            }
+            None => {}
+        }
+    }
     keep.extend(exclusions.iter().filter(|s| is_deny_scope(s)).cloned());
     keep.extend(ceiling.exclusions());
     keep
@@ -413,6 +468,37 @@ mod tests {
             &Ceiling::Unbounded,
         );
         assert_eq!(request, set(&["urn:cap:lisp"]));
+    }
+
+    #[test]
+    fn a_family_takes_the_publishers_grants_under_it() {
+        let family = "urn:cap:store:read:graph:*";
+        let publisher = Capability::scoped([
+            "urn:cap:store:read:graph:urn:a",
+            "urn:cap:store:read:graph:urn:b",
+            "urn:cap:other",
+        ]);
+        let grant = grant_at_publish(&publisher, &set(&[family])).unwrap();
+        assert_eq!(
+            grant.granted,
+            set(&[
+                "urn:cap:store:read:graph:urn:a",
+                "urn:cap:store:read:graph:urn:b"
+            ])
+        );
+        // Holding nothing under it is holding nothing it declares.
+        assert!(grant_at_publish(&Capability::scoped(["urn:cap:other"]), &set(&[family])).is_err());
+        // Root keeps the family, as a marker for the run to expand.
+        let root = grant_at_publish(&Capability::root(), &set(&[family])).unwrap();
+        assert_eq!(root.granted, set(&[family]));
+        // The ceiling narrows the members.
+        let keep = effective(
+            &set(&[family]),
+            &grant.granted,
+            &BTreeSet::new(),
+            &Ceiling::scoped(["urn:cap:store:read:graph:urn:a"]),
+        );
+        assert_eq!(keep, set(&["urn:cap:store:read:graph:urn:a"]));
     }
 
     #[test]

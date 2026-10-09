@@ -128,3 +128,104 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
         "{report}"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// The same walk over a host with a SPARQL door, where each published query is its own
+// entry: the per-script `…:result` and `…:runs` must conform like any endpoint.
+// ---------------------------------------------------------------------------------------
+
+const STORE_IDS: [&str; 13] = [
+    "store-select",
+    "store-graph-select",
+    "store-ask",
+    "store-graph-ask",
+    "store-construct",
+    "store-graph-construct",
+    "store-describe",
+    "store-graph-describe",
+    "store-info",
+    "store-graphs",
+    "store-update",
+    "store-graph-update",
+    "store-load",
+];
+
+fn sparql_seeded() -> (SparqlHost, String) {
+    let host = sparql_host();
+    seed(
+        &host.kernel,
+        "INSERT DATA { GRAPH <urn:test:g> { <urn:item:1> <urn:p:age> 10 } }",
+    );
+    let version = publish(&host.kernel, "walk", "(+ 1 2)", &[]);
+    publish(&host.kernel, "retiree", "1", &[]);
+    ok(&host.kernel, Verb::Sink, "urn:script:walk:runs", &[]);
+    publish(
+        &host.kernel,
+        "walkq",
+        "# The walk's query.\n# @param days xsd:integer -- older than this\n\
+         SELECT ?item WHERE { GRAPH <urn:test:g> { ?item <urn:p:age> ?age FILTER(?age > ?days) } }",
+        &[("language", "sparql")],
+    );
+    publish(
+        &host.kernel,
+        "walku",
+        "# @param age xsd:integer\n\
+         INSERT { GRAPH <urn:test:g> { ?item <urn:p:age> ?age } } WHERE { GRAPH <urn:test:g> { ?item <urn:p:age> ?old } }",
+        &[("language", "sparql")],
+    );
+    let digest = version
+        .rsplit(":version:")
+        .next()
+        .expect("a version IRI")
+        .to_string();
+    (host, digest)
+}
+
+fn sparql_suite(digest: &str) -> Suite {
+    STORE_IDS
+        .iter()
+        .fold(suite(digest), |suite, id| {
+            suite.opt_out(
+                *id,
+                None,
+                "ikigai-store's own conformance suite covers it; it is bound here because \
+                 every SPARQL run composes over it",
+            )
+        })
+        .fixture(Fixture::new("script-walkq-result", Verb::Source).arg("days", "1"))
+        // A SPARQL run's piped `content` is its parameters as one JSON object.
+        .fixture(
+            Fixture::new("script-walkq-runs", Verb::Sink)
+                .arg("days", "1")
+                .arg("content", "{}"),
+        )
+        .fixture(
+            Fixture::new("script-walku-runs", Verb::Sink)
+                .arg("age", "11")
+                .arg("content", "{}"),
+        )
+}
+
+#[test]
+fn a_host_with_sparql_scripts_conforms() {
+    let (host, digest) = sparql_seeded();
+    let report = sparql_suite(&digest).run_blocking(&host.kernel);
+    println!("{report}");
+    assert!(report.is_clean(), "{report}");
+    let mut walked: Vec<&str> = report
+        .walked
+        .iter()
+        .map(String::as_str)
+        .filter(|id| id.starts_with("script-walk"))
+        .collect();
+    walked.sort_unstable();
+    assert_eq!(
+        walked,
+        vec![
+            "script-walkq-result",
+            "script-walkq-runs",
+            "script-walku-runs"
+        ],
+        "{report}"
+    );
+}

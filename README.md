@@ -1,10 +1,10 @@
 # ikigai-script
 
-**Scripts as resources in any ikigai host.** Write a few lines of Lisp, publish them at a
-name, and every door the host already has (REST, the REPL, MCP, a timer, an admin panel)
-can fetch them, run them, and see who ran what, under exactly what authority. No second
-API, no second permission system: a script is a resource like any other, and running it
-is a read or a write like any other.
+**Scripts as resources in any ikigai host.** Write a few lines of Lisp, or a SPARQL
+query, publish them at a name, and every door the host already has (REST, the REPL, MCP,
+a timer, an admin panel) can fetch them, run them, and see who ran what, under exactly
+what authority. No second API, no second permission system: a script is a resource like
+any other, and running it is a read or a write like any other.
 
 ```text
 urn:script:{name}                    Source Exists Sink Delete  the script: fetch WITHOUT running, publish, retire
@@ -16,6 +16,9 @@ urn:script:{name}:run:{id}           Source Exists              one recorded run
 urn:script:eval                      Sink                       run supplied code under the caller's own authority
 urn:script:catalog                   Source                     every script the caller may read
 ```
+
+A published SPARQL query is also its OWN entry in the host's catalog: `urn:script:{name}:result`
+and `…:runs` with the query's declared parameters as their arguments (see "Queries as scripts").
 
 ## Why resources
 
@@ -76,9 +79,10 @@ A host library: no binary. A host mounts `space(config)` beside the evaluator it
 are written for, and decides the three things only a host can.
 
 ```rust,no_run
-use ikigai_core::{Fallback, Kernel, Space};
+use ikigai_core::{Fallback, Kernel, Space, BINDINGS_THREAD};
 use ikigai_script::{authority::{Ceiling, CeilingPolicy}, space, DirBackend, SpaceConfig};
-use std::sync::Arc;
+use ikigai_script::sparql::SparqlDoor;
+use std::sync::{Arc, OnceLock, Weak};
 
 let config_home = std::path::PathBuf::from("/path/to/config-home");
 let backend = Arc::new(DirBackend::open(config_home.join("scripts")).expect("a directory"));
@@ -89,13 +93,27 @@ let ceiling: CeilingPolicy = Arc::new(move |name| {
         .and_then(|text| Ceiling::parse(&text).ok())
         .unwrap_or_else(Ceiling::nothing) // no file: the script may touch nothing
 });
+// The kernel does not exist yet when the space is built; the change hook reaches it later.
+let kernel_cell: Arc<OnceLock<Weak<Kernel>>> = Arc::new(OnceLock::new());
+let cell = Arc::clone(&kernel_cell);
 let scripts = space(SpaceConfig::new(backend, ceiling)
-    .principal(Arc::new(|_inv| /* what your door authenticated */ "urn:example:me".into())));
+    .principal(Arc::new(|_inv| /* what your door authenticated */ "urn:example:me".into()))
+    // SPARQL scripts, run against the store bound below.
+    .sparql(SparqlDoor::store())
+    // A published query is its own catalog entry: re-describe after every publish.
+    .on_change(Arc::new(move |_name| {
+        if let Some(kernel) = cell.get().and_then(Weak::upgrade) {
+            kernel.cut(BINDINGS_THREAD);
+        }
+    })));
+let store = ikigai_store::DurableStore::in_memory().expect("a store"); // `open(path)` for real
 let root = Fallback::new(vec![
     Arc::new(scripts) as Arc<dyn Space>,
+    Arc::new(ikigai_store::space(store)) as Arc<dyn Space>,
     Arc::new(ikigai_lisp::space()) as Arc<dyn Space>,
 ]);
-let kernel = Kernel::new(Arc::new(root));
+let kernel = Arc::new(Kernel::new(Arc::new(root)));
+let _ = kernel_cell.set(Arc::downgrade(&kernel));
 ```
 
 ### What the host must supply
@@ -141,7 +159,7 @@ hangs from.
 
 ## Lisp
 
-The only language in this version, reached as a resource: a run is a sub-request to
+Reached as a resource: a run is a sub-request to
 `urn:lisp:eval` with the program as `in` and the run's input as `data` (read with
 `(input)`), so this crate links no interpreter. Built and tested against the published
 `ikigai-lisp` 0.1.15. When 0.2.0 (the allowlist sandbox) is published nothing here changes
@@ -154,6 +172,114 @@ offers no compile step to cache, so `…:compiled` is the head version's program
 the authority it runs under, cached and cut with the script. A language with a real
 compile step (plans, TypeScript) fills the same slot.
 
+## Queries as scripts
+
+A stored SPARQL query is a script whose language is `sparql`. No second system: it gets
+versions, the three authorities, run records and the manifold from everything above, and
+three things of its own, each read from the PARSED text and never from a caller's argument.
+
+```text
+sink urn:script:stale language=sparql content='
+# Open items nobody has touched in a while.
+# @param days xsd:integer default 7 -- untouched for more than this many days
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+SELECT ?item ?age FROM <urn:iki:ledger:default>
+WHERE { ?item ledger:age ?age FILTER(?age > ?days) } ORDER BY DESC(?age)'
+
+source urn:script:stale:result days=14 as=text/csv
+```
+
+**Its form.** SELECT, ASK, CONSTRUCT and DESCRIBE run as READS at `…:result`, cached as the
+store's answer is (they hang from the store's write threads, so a write to the store
+recomputes them, and a republish cuts the script's thread as for Lisp). An UPDATE runs as a
+WRITE at `…:runs`, with a run record; `…:result` on an update is refused, naming `…:runs`. A
+query may also run through `…:runs` when a run should be recorded.
+
+**Its parameters**, declared in the comment block before the first token, one per line:
+
+```text
+# @param <name> <type> [required | optional | default <value>] [-- <summary>]
+```
+
+`<name>` is the query variable it binds (`?days` or `$days`); `<type>` is an XSD datatype
+(`xsd:string`, `xsd:boolean`, `xsd:integer`, `xsd:decimal`, `xsd:double`, `xsd:float`,
+`xsd:date`, `xsd:dateTime`, `xsd:time`, the three durations, `xsd:anyURI`), bound as a typed
+literal after its lexical form is checked and in its canonical form; or a class (`<iri>`, or
+`rdfs:Resource` for any IRI), bound as an IRI. Bare means required; a `default` is optional
+with that value (a JSON string, `"like this"`, when it has a space). A declared parameter the
+query never uses, one the query binds itself (`BIND … AS`, `VALUES`, `GROUP BY`), a datatype
+parameter in a predicate or graph-name position, and a declaration outside that block are
+refused at publish. The parameters become the ArgSpecs of the script's own `…:result` and
+`…:runs`, so they appear in the catalog, MCP and the Emacs aliases as real arguments. A run
+refuses a missing required parameter (`MissingArgument`), a value not of its type and an
+argument the script does not declare (`InvalidArgument`: a binding the query does not mention
+is refused, never ignored). Through `…:runs` they may also arrive as one JSON object piped as
+`content`.
+
+**★ Values are bound as RDF terms, never spliced.** The text is parsed, each parameter's
+variable is replaced by its term in the ALGEBRA (patterns, paths, expressions, templates; a
+projected parameter becomes `(term AS ?p)`), and the store is sent what spargebra serializes
+from that algebra, which writes a literal as one escaped token. A value that tries to close a
+string, open a graph pattern or smuggle a second operation arrives as one literal:
+`tests/sparql.rs` sends five such values through a query and a `DROP ALL` through an update,
+and reads each back intact beside an untouched store. An IRI parameter refuses what is not an
+IRI rather than mangling it.
+
+### Derived authority
+
+The author does not declare what a query needs; the text says it. Each graph a query names
+(`FROM`, `FROM NAMED`, `GRAPH <iri>`, and the host's default dataset when it reads the default
+graph without `FROM`) derives `urn:cap:store:read:graph:<iri>`; an update's one graph derives
+`urn:cap:store:write:graph:<iri>`, and the read grant too when it has a `WHERE` (the store's
+own rule). A `requires=` at publish that says anything else is refused, naming the derived
+set. The phase-1 rule holds on top: a run gets the derived set, narrowed to what its publisher
+held at publish and the host's ceiling allows, intersected with the runner's own capability.
+A grant any of those withholds is refused before the store is asked, naming the graph and the
+grant.
+
+`GRAPH ?g` (a graph the text does not fix) derives the family `urn:cap:store:read:graph:*` and
+runs over **the caller's readable union, and never more**: the graph grants the runner holds,
+that the publisher held (all of them, when the publisher was root) and the ceiling allows,
+computed per run. A parameter naming a graph is admitted the same way.
+
+### The dataset, and what is refused at publish
+
+A run is a sub-request to the store's graph-scoped doors (`urn:iki:store:graph-select`, `-ask`,
+`-construct`, `-describe`, `-update`), so the store's pre-parse bound, sized stack, tenancy and
+coming time budget apply to every run; this crate parses but never evaluates. Those doors take
+ONE set of graphs, whose merge is the default graph and whose members are the named graphs, so
+a script's dataset is every graph it names and its `FROM` clauses are removed from the text the
+store sees. Where that one dataset would change the answer, the query is refused at publish
+instead of answered differently: a query reading the default graph (a bare pattern, or a
+DESCRIBE) must name its whole dataset with `FROM`, and may not also read a `GRAPH ?g`. An update
+writes exactly one named graph and reads no other; `LOAD`, `SERVICE`, `DROP ALL` and a write to
+the default graph are refused. The text is checked against the store's bound
+(`src/limits.rs`, copied from ikigai-store) before it is parsed here at all.
+
+### Faces
+
+`as=` on `…:result`: `application/sparql-results+json` (the default), `+xml`, `text/csv` or
+`text/tab-separated-values` for SELECT and ASK; `text/turtle` (the default) or
+`application/n-triples` for CONSTRUCT and DESCRIBE. Anything else is refused, never substituted.
+
+### What a host supplies for queries
+
+- **The door**: `SpaceConfig::sparql(SparqlDoor::store())`, beside an `ikigai_store::space`.
+  `SparqlDoor::store_at(prefix)` for a store mounted elsewhere; `.default_graphs(…)` for the
+  dataset a query without `FROM` reads. Without a door, `language=sparql` is refused.
+- **The change hook**: `SpaceConfig::on_change(…)`, wired to
+  `kernel.cut(ikigai_core::BINDINGS_THREAD)`. Each published query is its own catalog entry
+  with its own parameters, and the kernel caches descriptions under that thread, which only
+  the host can cut. Unwired, a new query runs at once but the catalog, MCP and the engine's
+  argument routing describe the old set.
+- **The store grants** its runners need: the exact `urn:cap:store:read:graph:<iri>` (and
+  write) tokens. A root runner of a query over `GRAPH ?g` that a root published lists the
+  store's graphs through `urn:iki:store:graphs`, under the broad `urn:cap:store:read` it holds.
+- ⚠ **A script's contract is public.** `Meta` is answered from the description, unguarded, so
+  anyone who can reach the door can learn a published query's parameter names and types (not
+  its text, which stays behind the read grant). The catalog itself needs the kernel's inspect
+  grant, and the action manifold offers a private query only to holders of its run grant.
+
 ## Not in this version
 
 - **PATCH** (edit in place) and **rollback** (re-pointing the head at an older version):
@@ -164,6 +290,11 @@ compile step (plans, TypeScript) fills the same slot.
 - **Draft privacy**: a draft is readable by any holder of the script's read grant, not
   only its author.
 - **A Turtle face**: every record is `text/plain` and `application/json`.
+- **For SPARQL**: the SPARQL Protocol face over `urn:script:eval` (ledger #955; `eval` refuses
+  `language=sparql` until then); list-valued parameters (an `IN (…)` or `VALUES` over several
+  terms); an update whose graph is a parameter; `urn:sparql:*` as a door (its per-query space
+  reads kernel resources under the caller's own authority, so there is no graph token to derive,
+  and its shared-store space has one coarse update grant).
 - **Piping into `…:result`**: its one input, `data`, is optional, so the engine has no
   required argument to route a pipe into. Pipe into `…:runs` (its `content`), or name
   `data=`.
