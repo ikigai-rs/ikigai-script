@@ -481,7 +481,10 @@ mod tests {
         let grant = grant_at_publish(&publisher, &set(&[family])).unwrap();
         assert_eq!(
             grant.granted,
-            set(&["urn:cap:store:read:graph:urn:a", "urn:cap:store:read:graph:urn:b"])
+            set(&[
+                "urn:cap:store:read:graph:urn:a",
+                "urn:cap:store:read:graph:urn:b"
+            ])
         );
         // Holding nothing under it is holding nothing it declares.
         assert!(grant_at_publish(&Capability::scoped(["urn:cap:other"]), &set(&[family])).is_err());

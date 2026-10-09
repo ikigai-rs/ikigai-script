@@ -342,19 +342,18 @@ impl Parameter {
             detail,
         };
         match &self.kind {
-            ParamType::Class(class) => NamedNode::new(lexical.trim())
-                .map(Value::Iri)
-                .map_err(|e| {
+            ParamType::Class(class) => {
+                NamedNode::new(lexical.trim()).map(Value::Iri).map_err(|e| {
                     bad(format!(
                         "`{lexical}` is not an IRI ({e}); this parameter names an instance of \
                          <{class}>"
                     ))
-                }),
+                })
+            }
             ParamType::Datatype(datatype) => {
                 let local = datatype.strip_prefix(XSD).unwrap_or(datatype);
-                let canonical = canonical(local, lexical).ok_or_else(|| {
-                    bad(format!("`{lexical}` is not a valid xsd:{local}"))
-                })?;
+                let canonical = canonical(local, lexical)
+                    .ok_or_else(|| bad(format!("`{lexical}` is not a valid xsd:{local}")))?;
                 Ok(Value::Literal(Literal::new_typed_literal(
                     canonical,
                     NamedNode::new_unchecked(datatype.clone()),
@@ -367,8 +366,8 @@ impl Parameter {
 /// The canonical lexical form of `lexical` as `xsd:{local}`, or `None` when it is not one.
 fn canonical(local: &str, lexical: &str) -> Option<String> {
     use oxsdatatypes::{
-        Boolean, Date, DateTime, DayTimeDuration, Decimal, Double, Duration, Float, Integer,
-        Time, YearMonthDuration,
+        Boolean, Date, DateTime, DayTimeDuration, Decimal, Double, Duration, Float, Integer, Time,
+        YearMonthDuration,
     };
     // XSD's whitespace facet is `collapse` for every type here but string.
     let t = lexical.trim();
@@ -473,7 +472,11 @@ fn declaration(rest: &str, line: usize) -> Result<Parameter> {
     }
     let kind = tokens
         .word()
-        .ok_or_else(|| bad(format!("`{name}` needs a type: `xsd:integer`, `<class IRI>`, …")))
+        .ok_or_else(|| {
+            bad(format!(
+                "`{name}` needs a type: `xsd:integer`, `<class IRI>`, …"
+            ))
+        })
         .and_then(|t| param_type(&t).map_err(bad))?;
     let mut parameter = Parameter {
         name,
@@ -577,7 +580,9 @@ impl Tokens<'_> {
                 self.rest = &rest[stream.byte_offset()..];
                 Ok(Some(value))
             }
-            _ => Err(format!("`{rest}` does not start with a complete JSON string")),
+            _ => Err(format!(
+                "`{rest}` does not start with a complete JSON string"
+            )),
         }
     }
 }
@@ -977,14 +982,13 @@ fn update_shape(update: &Update) -> Result<Shape> {
                      an update script writes only what its text says",
                 ))
             }
-            GraphUpdateOperation::Clear { graph, .. } | GraphUpdateOperation::Drop { graph, .. } => {
-                match graph {
-                    GraphTarget::NamedNode(g) => {
-                        targets.insert(g.as_str().to_string());
-                    }
-                    _ => return Err(unnamed_target()),
+            GraphUpdateOperation::Clear { graph, .. }
+            | GraphUpdateOperation::Drop { graph, .. } => match graph {
+                GraphTarget::NamedNode(g) => {
+                    targets.insert(g.as_str().to_string());
                 }
-            }
+                _ => return Err(unnamed_target()),
+            },
             GraphUpdateOperation::Create { graph, .. } => {
                 targets.insert(graph.as_str().to_string());
             }
@@ -1453,9 +1457,7 @@ impl Subst<'_> {
             GraphPattern::OrderBy { inner, expression } => {
                 for e in expression {
                     match e {
-                        OrderExpression::Asc(e) | OrderExpression::Desc(e) => {
-                            self.expression(e)?
-                        }
+                        OrderExpression::Asc(e) | OrderExpression::Desc(e) => self.expression(e)?,
                     }
                 }
                 self.pattern(inner)?
@@ -1585,14 +1587,20 @@ mod tests {
     #[test]
     fn the_form_is_read_from_the_text() {
         let cases = [
-            ("SELECT * WHERE { GRAPH <urn:g> { ?s ?p ?o } }", Form::Select),
+            (
+                "SELECT * WHERE { GRAPH <urn:g> { ?s ?p ?o } }",
+                Form::Select,
+            ),
             ("ASK { GRAPH <urn:g> { ?s ?p ?o } }", Form::Ask),
             (
                 "CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <urn:g> { ?s ?p ?o } }",
                 Form::Construct,
             ),
             ("DESCRIBE <urn:x> FROM <urn:g>", Form::Describe),
-            ("INSERT DATA { GRAPH <urn:g> { <urn:a> <urn:b> 1 } }", Form::Update),
+            (
+                "INSERT DATA { GRAPH <urn:g> { <urn:a> <urn:b> 1 } }",
+                Form::Update,
+            ),
         ];
         for (text, form) in cases {
             assert_eq!(analyze(text, &door()).unwrap().form, form, "{text}");
@@ -1667,7 +1675,11 @@ mod tests {
                 "urn:cap:store:write:graph:urn:g".to_string()
             ]
         );
-        let a = analyze("INSERT DATA { GRAPH <urn:g> { <urn:a> <urn:b> 1 } }", &door()).unwrap();
+        let a = analyze(
+            "INSERT DATA { GRAPH <urn:g> { <urn:a> <urn:b> 1 } }",
+            &door(),
+        )
+        .unwrap();
         assert!(!a.update_reads);
         let a = analyze(
             "WITH <urn:g> DELETE { ?s <urn:p> ?o } WHERE { ?s <urn:p> ?o }",
@@ -1719,9 +1731,16 @@ mod tests {
                     SELECT ?s ?days FROM <urn:g> WHERE { ?s <urn:age> ?a FILTER(?a > ?days) }";
         let bound = bind(text, &door(), &values(&[("days", int(7))])).unwrap();
         assert!(!bound.text.contains("FROM"), "{}", bound.text);
-        assert!(!bound.text.contains("?days >") && !bound.text.contains("> ?days"), "{}", bound.text);
+        assert!(
+            !bound.text.contains("?days >") && !bound.text.contains("> ?days"),
+            "{}",
+            bound.text
+        );
         assert!(bound.text.contains("AS ?days"), "{}", bound.text);
-        assert_eq!(bound.graphs.iter().cloned().collect::<Vec<_>>(), vec!["urn:g"]);
+        assert_eq!(
+            bound.graphs.iter().cloned().collect::<Vec<_>>(),
+            vec!["urn:g"]
+        );
         // And the text it serialized parses back.
         SparqlParser::new().parse_query(&bound.text).unwrap();
     }
@@ -1736,7 +1755,10 @@ mod tests {
         let reparsed = SparqlParser::new().parse_query(&bound.text).unwrap();
         // Still one SELECT, and the literal is intact inside it.
         assert!(matches!(reparsed, Query::Select { .. }), "{}", bound.text);
-        assert!(bound.text.contains("DROP ALL"), "the value is there, as a literal");
+        assert!(
+            bound.text.contains("DROP ALL"),
+            "the value is there, as a literal"
+        );
         assert!(SparqlParser::new().parse_update(&bound.text).is_err());
     }
 

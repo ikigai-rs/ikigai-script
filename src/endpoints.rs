@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use ikigai_core::{
     ActionSpec, ArgRef, ArgSpec, Description, Endpoint, EndpointSpace, Error, Exact, Invocation,
-    Iri, ReprType, Representation, Request, Resolution, Result, Scope, Space, SpaceEntry,
-    Topology, UriTemplate, Verb,
+    Iri, ReprType, Representation, Request, Resolution, Result, Scope, Space, SpaceEntry, Topology,
+    UriTemplate, Verb,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1067,6 +1067,9 @@ async fn plan_sparql(
         let graph = bound.graphs.iter().next().cloned().ok_or_else(|| {
             Error::Endpoint(format!("urn:script:{name} names no graph to update"))
         })?;
+        for scope in &prepared.requires {
+            may_use(name, &graph, scope, &keep, runner)?;
+        }
         let request = Request::new(Verb::Sink, iri(&door.query_iri(Form::Update))?)
             .with_arg("content", inline(&bound.text))
             .with_arg("graph", inline(&graph));
@@ -1131,12 +1134,41 @@ async fn plan_sparql(
         )));
     }
     keep.extend(extra);
+    for graph in &dataset {
+        may_use(name, graph, &sparql::cap_read_graph(graph), &keep, runner)?;
+    }
     let graphs = dataset.into_iter().collect::<Vec<_>>().join(" ");
     let request = Request::new(Verb::Source, iri(&door.query_iri(bound.form))?)
         .with_arg("query", inline(&bound.text))
         .with_arg("graph", inline(&graphs))
         .with_arg("as", inline(face));
     Ok(Planned { request, keep })
+}
+
+/// Refused HERE, naming the exact grant and who withheld it, rather than by the store's
+/// door: the kernel's floor there sees only the family a run holds, so its refusal would
+/// name `urn:cap:store:read:graph:*` and not the graph.
+fn may_use(
+    name: &str,
+    graph: &str,
+    scope: &str,
+    keep: &BTreeSet<String>,
+    runner: &ikigai_core::Capability,
+) -> Result<()> {
+    if !runner.allows(scope) {
+        return Err(Error::Denied(format!(
+            "running urn:script:{name} reads or writes <{graph}>, which needs `{scope}`, and the \
+             runner does not hold it"
+        )));
+    }
+    if !keep.contains(scope) {
+        return Err(Error::Denied(format!(
+            "running urn:script:{name} reads or writes <{graph}>, which needs `{scope}`, and \
+             this script may not have it: its publisher did not hold it, or the host's ceiling \
+             for it does not allow it"
+        )));
+    }
+    Ok(())
 }
 
 /// The face a SPARQL run answers in: `as=`, one its form can serve, or the form's default.
@@ -1203,9 +1235,10 @@ fn parameter_values(
     }
     let mut piped: BTreeMap<String, String> = BTreeMap::new();
     if through == Door::Runs {
-        if let Some(content) = optional(inv, "content")? {
-            let object: serde_json::Map<String, serde_json::Value> =
-                serde_json::from_str(content).map_err(|e| Error::InvalidArgument {
+        // An empty body is no parameters: a bare `sink …:runs` sends one.
+        if let Some(content) = optional(inv, "content")?.filter(|c| !c.trim().is_empty()) {
+            let object: serde_json::Map<String, serde_json::Value> = serde_json::from_str(content)
+                .map_err(|e| Error::InvalidArgument {
                     name: "content".to_string(),
                     detail: format!(
                         "a SPARQL script's piped content is its parameters as one JSON object \
@@ -1282,9 +1315,7 @@ impl Endpoint for ResultEndpoint {
         let planned = plan(inv, &self.shared, &prepared, keep, &ceiling, Door::Result).await?;
         // ★ The ONLY authority a run gets: the runner's own capability, narrowed. There is
         // no form that widens, so a script cannot reach past its runner whatever it says.
-        let answer = inv
-            .issue_attenuated(planned.request, planned.keep)
-            .await?;
+        let answer = inv.issue_attenuated(planned.request, planned.keep).await?;
         // Cacheable as far as this endpoint is concerned; the kernel folds in the
         // evaluator's expiry (a Lisp program is uncacheable unless it opts in with
         // `(cacheable …)`; a query is as cacheable as the store's answer, which hangs from
@@ -1412,12 +1443,18 @@ impl Endpoint for RunsEndpoint {
 // A published SPARQL script's own contract, and the space that offers it
 // ---------------------------------------------------------------------------------------
 
-/// A published SPARQL script's own endpoints: `…:result` (a query only) and `…:runs`, each
-/// the template's endpoint behind the script's OWN description.
+/// A SPARQL script's own endpoints, `…:result` and `…:runs`, each the template's endpoint
+/// behind the script's OWN description.
 #[derive(Clone)]
 struct PerScript {
-    result: Option<Arc<dyn Endpoint>>,
+    result: Arc<dyn Endpoint>,
     runs: Arc<dyn Endpoint>,
+    /// Whether its `…:result` is a read it offers (a query, not an update).
+    reads: bool,
+    /// Whether it is published, and so listed in the catalog. A draft or a retired script
+    /// still answers under its own contract (its run is refused for its state, not for a
+    /// language capability it never needed), but is not offered.
+    listed: bool,
 }
 
 /// The template's endpoint, behind one script's contract.
@@ -1457,7 +1494,7 @@ pub struct ScriptSpace {
 }
 
 impl ScriptSpace {
-    /// The script's own endpoints, when it is a published SPARQL script this host can run.
+    /// The script's own endpoints, when it is a SPARQL script this host can run.
     fn per_script(&self, name: &str) -> Option<PerScript> {
         let shared = &self.shared;
         if let Some(known) = shared
@@ -1481,9 +1518,6 @@ impl ScriptSpace {
         let shared = &self.shared;
         let door = shared.sparql.as_ref()?;
         let head = shared.backend.head(name).ok()??;
-        if head.state != State::Published {
-            return None;
-        }
         let version = shared.backend.version(name, &head.version).ok()??;
         if version.language != Language::Sparql {
             return None;
@@ -1501,9 +1535,11 @@ impl ScriptSpace {
         let params = |mut spec: ActionSpec| {
             for p in &analysis.parameters {
                 let mut arg = ArgSpec::new(p.name.clone())
-                    .summary(p.summary.clone().unwrap_or_else(|| {
-                        format!("The value of ?{} in the query.", p.name)
-                    }))
+                    .summary(
+                        p.summary
+                            .clone()
+                            .unwrap_or_else(|| format!("The value of ?{} in the query.", p.name)),
+                    )
                     .class(p.kind.iri().to_string());
                 if let Some(default) = &p.default {
                     arg = arg.default_value(default.clone()).optional();
@@ -1531,30 +1567,40 @@ impl ScriptSpace {
                 .default_value(faces[0])
                 .optional()
         };
-        let result = form.is_read().then(|| {
-            let id = format!("script-{name}-result");
+        let id = format!("script-{name}-result");
+        let description = if form.is_read() {
             let mut spec = params(ActionSpec::new(Verb::Source))
                 .summary(format!("Run the query {name} and answer its result."))
                 .input(as_arg());
             for face in faces {
                 spec = spec.output(*face);
             }
-            Arc::new(Described {
-                inner: Arc::new(ResultEndpoint {
-                    shared: Arc::clone(shared),
-                }),
-                description: Description::new(id.clone())
-                    .title(format!("{name}: a SPARQL {}", form.as_str().to_uppercase()))
-                    .summary(format!(
-                        "{about}Runs as a READ under the runner's capability narrowed to the \
-                         graphs the query names; cached as the store's answer is, and \
-                         recomputed after a write to the store or a republish."
-                    ))
-                    .verb(Verb::Meta)
-                    .action(spec),
-                id,
-            }) as Arc<dyn Endpoint>
-        });
+            Description::new(id.clone())
+                .title(format!("{name}: a SPARQL {}", form.as_str().to_uppercase()))
+                .summary(format!(
+                    "{about}Runs as a READ under the runner's capability narrowed to the \
+                     graphs the query names; cached as the store's answer is, and \
+                     recomputed after a write to the store or a republish."
+                ))
+                .verb(Verb::Meta)
+                .action(spec)
+        } else {
+            // An update is never a read: no action is offered here, and a Source that
+            // arrives anyway is refused by the run, naming `…:runs`.
+            Description::new(id.clone())
+                .title(format!("{name}: a SPARQL UPDATE (run it at …:runs)"))
+                .summary(format!(
+                    "{about}A write: run it with a Sink to urn:script:{name}:runs."
+                ))
+                .verb(Verb::Meta)
+        };
+        let result = Arc::new(Described {
+            inner: Arc::new(ResultEndpoint {
+                shared: Arc::clone(shared),
+            }),
+            description,
+            id,
+        }) as Arc<dyn Endpoint>;
         let id = format!("script-{name}-runs");
         let mut spec = params(ActionSpec::new(Verb::Sink))
             .summary(format!(
@@ -1587,7 +1633,12 @@ impl ScriptSpace {
                 .action(spec),
             id,
         }) as Arc<dyn Endpoint>;
-        Some(PerScript { result, runs })
+        Some(PerScript {
+            result,
+            runs,
+            reads: form.is_read(),
+            listed: head.state == State::Published,
+        })
     }
 }
 
@@ -1631,12 +1682,11 @@ impl Space for ScriptSpace {
             }
             Resolution::Miss => return resolution,
         };
-        let own = self.per_script(&name).and_then(|per| match part {
-            Door::Result => per.result,
-            Door::Runs => Some(per.runs),
-        });
-        match own {
-            Some(endpoint) => resolution.map_endpoint(|_| endpoint),
+        match self.per_script(&name) {
+            Some(per) => resolution.map_endpoint(|_| match part {
+                Door::Result => per.result,
+                Door::Runs => per.runs,
+            }),
             None => resolution,
         }
     }
@@ -1644,13 +1694,13 @@ impl Space for ScriptSpace {
     fn entries(&self) -> Option<Vec<SpaceEntry>> {
         let mut entries = self.inner.entries().unwrap_or_default();
         for name in self.shared.backend.names().unwrap_or_default() {
-            let Some(per) = self.per_script(&name) else {
+            let Some(per) = self.per_script(&name).filter(|per| per.listed) else {
                 continue;
             };
-            if let Some(result) = &per.result {
+            if per.reads {
                 entries.push(SpaceEntry::new(
                     name::part_iri(&name, "result"),
-                    result.name(),
+                    per.result.name(),
                 ));
             }
             entries.push(SpaceEntry::new(

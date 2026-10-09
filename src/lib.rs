@@ -61,10 +61,15 @@
 //!
 //! # Languages are resources
 //!
-//! A run is a sub-request to the language's evaluator (`urn:lisp:eval` for Lisp, the only
-//! language in this version), so this crate links no interpreter, and the evaluator's own
-//! capability (`urn:cap:lisp`) is part of what every script declares: evaluating code is
-//! itself authority.
+//! A run is a sub-request to the language's evaluator, so this crate links no interpreter:
+//!
+//! - **Lisp** reaches `urn:lisp:eval`, and the evaluator's own capability (`urn:cap:lisp`) is
+//!   part of what every Lisp script declares: evaluating code is itself authority.
+//! - **SPARQL** reaches the host's store through its graph-scoped doors
+//!   ([`sparql::SparqlDoor`]). A query's form, its declared and typed parameters, and the
+//!   authority it needs (the store's per-graph grants) are all read from the parsed text,
+//!   and parameter values are bound into the parsed algebra, never spliced. Each published
+//!   query is its own catalog entry with its parameters as arguments. See [`sparql`].
 
 #![deny(missing_docs)]
 
@@ -77,7 +82,9 @@ pub mod name;
 pub mod sparql;
 
 pub use backend::{Backend, DirBackend, MemoryBackend};
-pub use endpoints::{space, Catalog, CatalogEntry, LastRun, Prepared, SpaceConfig};
+pub use endpoints::{
+    space, Catalog, CatalogEntry, ChangeHook, LastRun, Prepared, ScriptSpace, SpaceConfig,
+};
 pub use model::{Head, Language, Outcome, Run, State, Version};
 
 /// The README's example, compiled (never run: it opens a directory) so it cannot rot.
