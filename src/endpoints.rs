@@ -34,8 +34,11 @@ const JSON: &str = "application/json";
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const TURTLE: &str = "text/turtle";
 /// The faces of a read: the source (or a summary) for people, the record for machines.
 const READ_FACES: [&str; 2] = [PLAIN, JSON];
+/// The faces of the catalog and a run record: those, and the graph (see [`crate::graph`]).
+const RECORD_FACES: [&str; 3] = [PLAIN, JSON, TURTLE];
 
 /// What a host decides when it mounts scripts: where they live, the ceiling it allows each
 /// one, and who a request comes from. Built with [`SpaceConfig::new`] and handed to
@@ -381,13 +384,19 @@ fn parse_bool(name: &str, text: &str) -> Result<bool> {
     }
 }
 
-/// Which face was asked for. One this resource cannot serve is refused, never substituted.
+/// Which face was asked for: [`READ_FACES`]. One this resource cannot serve is refused,
+/// never substituted.
 fn wanted_face(inv: &Invocation<'_>) -> Result<&'static str> {
+    face_of(inv, &READ_FACES)
+}
+
+/// Which of `faces` was asked for (the first when none was).
+fn face_of(inv: &Invocation<'_>, faces: &[&'static str]) -> Result<&'static str> {
     match optional(inv, "as")? {
-        None => Ok(PLAIN),
+        None => Ok(faces[0]),
         Some(asked) => {
             let bare = asked.split(';').next().unwrap_or(asked).trim();
-            READ_FACES
+            faces
                 .iter()
                 .find(|face| **face == bare)
                 .copied()
@@ -395,7 +404,7 @@ fn wanted_face(inv: &Invocation<'_>) -> Result<&'static str> {
                     name: "as".to_string(),
                     detail: format!(
                         "`{asked}` is not a face this resource serves; one of {}",
-                        READ_FACES.join(", ")
+                        faces.join(", ")
                     ),
                 })
         }
@@ -444,6 +453,30 @@ fn as_arg() -> ArgSpec {
         .one_of(READ_FACES)
         .default_value(PLAIN)
         .optional()
+}
+
+/// `as` for a record with a graph face.
+fn record_as_arg() -> ArgSpec {
+    ArgSpec::new("as")
+        .summary(
+            "The face: `text/plain` (for people), `application/json` (the versioned record, \
+             `\"schema\": 1`) or `text/turtle` (the graph: PROV-O and the shared \
+             vocabulary, no blank nodes). Any other is refused, never substituted.",
+        )
+        .class(XSD_STRING)
+        .one_of(RECORD_FACES)
+        .default_value(PLAIN)
+        .optional()
+}
+
+fn turtle(graph: crate::graph::Graph) -> Result<Representation> {
+    let bytes = graph
+        .turtle()
+        .map_err(|e| Error::Endpoint(format!("could not write the graph face: {e}")))?;
+    Ok(Representation::new(
+        ReprType::new(TURTLE).with_param("charset", "utf-8"),
+        bytes,
+    ))
 }
 
 fn data_arg(arg: &str, summary: &str) -> ArgSpec {
@@ -2177,15 +2210,19 @@ impl Endpoint for RunEndpoint {
         match inv.request.verb {
             Verb::Exists => Ok(plain(if run.is_some() { "true\n" } else { "false\n" })),
             Verb::Source => {
-                let want = wanted_face(inv)?;
+                let want = face_of(inv, &RECORD_FACES)?;
                 let run = run.ok_or_else(|| {
                     Error::NotFound(format!("urn:script:{name} has no run {id_text}"))
                 })?;
                 let finished = run.outcome != Outcome::Running;
-                let repr = if want == JSON {
-                    json(&run)?
-                } else {
-                    plain(run.render())
+                let repr = match want {
+                    JSON => json(&run)?,
+                    TURTLE => {
+                        let mut graph = crate::graph::Graph::default();
+                        graph.record(&run);
+                        turtle(graph)?
+                    }
+                    _ => plain(run.render()),
                 };
                 // A finished run never changes again; one still running will.
                 Ok(if finished { repr.cacheable() } else { repr })
@@ -2215,12 +2252,13 @@ impl Endpoint for RunEndpoint {
             .verb(Verb::Meta)
             .action(
                 ActionSpec::new(Verb::Source)
-                    .summary("The run record.")
+                    .summary("The run record, as text, JSON, or a PROV-O graph (Turtle).")
                     .input(name_arg())
                     .input(id())
-                    .input(as_arg())
+                    .input(record_as_arg())
                     .output(PLAIN)
                     .output(JSON)
+                    .output(TURTLE)
                     .requires(CAP_ANY),
             )
             .action(
@@ -2404,9 +2442,11 @@ impl Endpoint for CatalogEndpoint {
         if inv.request.verb != Verb::Source {
             return Err(unsupported("script-catalog", inv.request.verb));
         }
-        let want = wanted_face(inv)?;
+        let want = face_of(inv, &RECORD_FACES)?;
         let backend = &self.shared.backend;
         let mut scripts = Vec::new();
+        // Each row's last run in full, for the graph face (a catalog row keeps less).
+        let mut last_runs = Vec::new();
         for name in backend.names()? {
             let own = holds(inv, &cap_read(&name));
             let mut entry = CatalogEntry {
@@ -2418,6 +2458,7 @@ impl Endpoint for CatalogEndpoint {
                 last_run: None,
                 error: None,
             };
+            let mut last = None;
             match backend.head(&name) {
                 // A broken head is shown to whoever may read the script, so the dashboard
                 // says what is wrong instead of losing the row (or the whole list).
@@ -2432,7 +2473,8 @@ impl Endpoint for CatalogEndpoint {
                     entry.state = Some(head.state);
                     entry.public = Some(head.public);
                     entry.version = Some(head.version);
-                    entry.last_run = backend.last_run(&name).ok().flatten().map(|run| LastRun {
+                    last = backend.last_run(&name).ok().flatten();
+                    entry.last_run = last.as_ref().map(|run| LastRun {
                         iri: run.iri(),
                         status: match run.outcome {
                             Outcome::Running => "running",
@@ -2445,7 +2487,15 @@ impl Endpoint for CatalogEndpoint {
                 }
                 _ => continue,
             }
+            last_runs.push(last);
             scripts.push(entry);
+        }
+        if want == TURTLE {
+            let mut graph = crate::graph::Graph::default();
+            for (entry, last) in scripts.iter().zip(&last_runs) {
+                graph.script(&entry.name, entry.version.as_deref(), last.as_ref());
+            }
+            return turtle(graph);
         }
         if want == JSON {
             // Live: a run that fails is recorded without a write through any name the
@@ -2506,10 +2556,11 @@ impl Endpoint for CatalogEndpoint {
             .verb(Verb::Meta)
             .action(
                 ActionSpec::new(Verb::Source)
-                    .summary("The catalog.")
-                    .input(as_arg())
+                    .summary("The catalog, as text, JSON, or a graph (Turtle).")
+                    .input(record_as_arg())
                     .output(PLAIN)
                     .output(JSON)
+                    .output(TURTLE)
                     .requires(CAP_READ),
             )
     }
