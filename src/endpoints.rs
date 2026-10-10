@@ -437,7 +437,7 @@ fn name_arg() -> ArgSpec {
     ArgSpec::new("name")
         .summary(
             "The script's name: one segment of lowercase letters, digits, `-` and `_` \
-             (`eval`, `catalog` and `public` are reserved).",
+             (`eval`, `catalog`, `public`, `outcome` and `principal` are reserved).",
         )
         .class(XSD_STRING)
         .binding()
@@ -877,6 +877,16 @@ impl Endpoint for VersionEndpoint {
             _ => Sight::Everyone,
         };
         let no_such = || Error::NotFound(format!("urn:script:{name} has no version {digest}"));
+        // ★ Hung from the SCRIPT's thread, which every publish and retire cuts (ledger #1076).
+        // Everything this answer says is the script's state, not the version's: whether that
+        // content has been written under the name (a version named by its content can be
+        // asked for before anyone publishes it), and whether the caller may read the name
+        // at all (a public script's version stops being readable through the public grant
+        // when it is retired). The kernel hangs a cacheable answer from its OWN name, which
+        // no write here ever targets, so without this a cached `false` outlived the publish
+        // that made it true. Caching the negative is kept, not dropped: it is a backend read
+        // per ask, and an uncacheable `Exists` would make every composite over it uncacheable.
+        let script_thread = name::script_iri(&name);
         match inv.request.verb {
             Verb::Exists => {
                 let exists = match version {
@@ -884,10 +894,10 @@ impl Endpoint for VersionEndpoint {
                     Err(Error::InvalidArgument { .. }) => false,
                     Err(other) => return Err(other),
                 };
-                Ok(cached_if(
-                    plain(if exists { "true\n" } else { "false\n" }),
-                    seen,
-                ))
+                Ok(
+                    cached_if(plain(if exists { "true\n" } else { "false\n" }), seen)
+                        .depends_on(script_thread),
+                )
             }
             Verb::Source => {
                 let want = wanted_face(inv)?;
@@ -900,7 +910,7 @@ impl Endpoint for VersionEndpoint {
                 } else {
                     plain(version.source)
                 };
-                Ok(cached_if(repr, seen))
+                Ok(cached_if(repr, seen).depends_on(script_thread))
             }
             other => Err(unsupported("script-version", other)),
         }

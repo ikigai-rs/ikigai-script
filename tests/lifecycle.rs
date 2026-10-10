@@ -370,7 +370,7 @@ fn the_catalog_lists_state_version_and_last_run() {
 #[test]
 fn names_are_checked() {
     let host = host();
-    for bad in ["eval-me:x", "Upper", "public"] {
+    for bad in ["eval-me:x", "Upper", "public", "outcome", "principal"] {
         let iri = format!("urn:script:{bad}");
         let result = call(
             &host.kernel,
@@ -402,4 +402,51 @@ fn requires_refuses_what_attenuation_could_not_keep() {
             "{bad}: {result:?}"
         );
     }
+}
+
+/// Ledger #1076: a version's answer is a projection of its SCRIPT's state (whether that
+/// content has been written under the name, and who may read the name), so it must hang
+/// from the thread a publish or a retire cuts, which is the script's, not only its own.
+#[test]
+fn a_version_asked_for_before_it_was_published_is_found_after() {
+    let host = host();
+    // Learn a digest without writing it under `later`: a version is named by its content,
+    // never by the script it belongs to.
+    let elsewhere = publish(&host.kernel, "elsewhere", "(+ 40 2)", &[]);
+    let digest = elsewhere.rsplit(":version:").next().unwrap().to_string();
+    let version = format!("urn:script:later:version:{digest}");
+    assert_eq!(ok(&host.kernel, Verb::Exists, &version, &[]), "false\n");
+    // Asked twice: the negative is still worth caching (it is a backend read), as long as
+    // the write that changes it cuts it.
+    assert_eq!(ok(&host.kernel, Verb::Exists, &version, &[]), "false\n");
+    assert_eq!(publish(&host.kernel, "later", "(+ 40 2)", &[]), version);
+    assert_eq!(
+        ok(&host.kernel, Verb::Exists, &version, &[]),
+        "true\n",
+        "a cached `false` outlived the publish that made the version"
+    );
+    assert_eq!(ok(&host.kernel, Verb::Source, &version, &[]), "(+ 40 2)");
+}
+
+#[test]
+fn a_public_version_is_not_served_from_the_cache_once_its_script_is_retired() {
+    let host = host();
+    let version = publish(&host.kernel, "shown", "1", &[("public", "true")]);
+    let reader = cap(&[ikigai_script::authority::CAP_READ_PUBLIC]);
+    let read = |verb| call(&host.kernel, &reader, verb, &version, &[]);
+    assert_eq!(read(Verb::Exists).unwrap(), "true\n");
+    assert_eq!(read(Verb::Source).unwrap(), "1");
+    ok(&host.kernel, Verb::Delete, "urn:script:shown", &[]);
+    // Retired is no longer public, so the public grant reaches nothing: the same answer an
+    // uncached read gives, and the one the head itself gives.
+    assert!(
+        matches!(read(Verb::Exists), Err(Error::Denied(_))),
+        "{:?}",
+        read(Verb::Exists)
+    );
+    assert!(
+        matches!(read(Verb::Source), Err(Error::Denied(_))),
+        "{:?}",
+        read(Verb::Source)
+    );
 }
