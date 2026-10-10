@@ -16,11 +16,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::executor::block_on;
 use ikigai_core::{
-    ArgRef, Capability, Clock, Description, Endpoint, EndpointSpace, Error, Exact, Fallback,
-    FnEndpoint, Invocation, Iri, Kernel, ReprType, Representation, Request, Result, Space, Time,
-    Verb,
+    ArgRef, AsyncFnEndpoint, Capability, Clock, Description, Endpoint, EndpointSpace, Error, Exact,
+    Fallback, FnEndpoint, Invocation, Iri, Kernel, ReprType, Representation, Request, Result,
+    Space, Time, Verb,
 };
-use ikigai_script::authority::{Ceiling, CeilingPolicy, PrincipalStamper};
+use ikigai_script::authority::{Ceiling, CeilingPolicy};
 use ikigai_script::{Backend, MemoryBackend, ScriptSpace, SpaceConfig};
 
 /// A clock that advances one second per reading, from 2026-09-15T00:00:00Z.
@@ -66,6 +66,9 @@ pub const CAP_VAULT: &str = "urn:cap:test:vault";
 /// - `urn:test:whoami` answers the capability it was resolved under, one scope per line
 ///   (`root` for root): what a run REALLY held, observed from the far side.
 /// - `urn:test:vault` is a Sink that declares (so the kernel enforces) [`CAP_VAULT`].
+/// - `urn:test:fallback?of=<iri>` is a COMPOSITE that reads `of` and, when it is NotFound,
+///   answers `fallback`, cacheably: the shape the field guide's first invalidation trap is
+///   about, so a test can ask whether a write that ends the absence reaches the fallback.
 fn probes() -> EndpointSpace {
     let whoami = FnEndpoint::new("whoami", |inv: &Invocation<'_>| {
         let text = match inv.capability.scopes() {
@@ -95,9 +98,31 @@ fn probes() -> EndpointSpace {
             .requires(CAP_VAULT)
             .output("text/plain"),
     );
+    let fallback = AsyncFnEndpoint::new("fallback", |inv| {
+        Box::pin(async move {
+            let of = Iri::parse(inv.inline_str("of")?)
+                .map_err(|e| Error::Endpoint(format!("`of` is not an IRI: {e}")))?;
+            match inv.source(&of).await {
+                Ok(found) => Ok(found.cacheable()),
+                Err(Error::NotFound(_)) => Ok(Representation::new(
+                    ReprType::new("text/plain"),
+                    b"fallback".to_vec(),
+                )
+                .cacheable()),
+                Err(other) => Err(other),
+            }
+        })
+    })
+    .with_description(
+        Description::new("fallback")
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .output("text/plain"),
+    );
     EndpointSpace::new()
         .bind(Exact::new("urn:test:whoami"), whoami)
         .bind(Exact::new("urn:test:vault"), vault)
+        .bind(Exact::new("urn:test:fallback"), fallback)
 }
 
 /// A test host: its kernel, its backend, and the evaluator's counter.
@@ -117,18 +142,11 @@ impl Host {
     }
 }
 
-/// A host over `backend`, with every script's ceiling answered by `ceiling` and every
-/// request's principal by `principal`.
-pub fn host_with(
-    backend: Arc<dyn Backend>,
-    ceiling: CeilingPolicy,
-    principal: Option<PrincipalStamper>,
-) -> Host {
+/// A host over `backend`, with every script's ceiling answered by `ceiling`. Who a request
+/// comes from is the principal its capability names (`Capability::with_principal`).
+pub fn host_with(backend: Arc<dyn Backend>, ceiling: CeilingPolicy) -> Host {
     let evals = Arc::new(AtomicUsize::new(0));
-    let mut config = SpaceConfig::new(Arc::clone(&backend), ceiling);
-    if let Some(principal) = principal {
-        config = config.principal(principal);
-    }
+    let config = SpaceConfig::new(Arc::clone(&backend), ceiling);
     let lisp = EndpointSpace::new().bind(
         Exact::new("urn:lisp:eval"),
         Counted {
@@ -157,7 +175,6 @@ pub fn host() -> Host {
     host_with(
         Arc::new(MemoryBackend::new()),
         ikigai_script::authority::same_for_all(Ceiling::unbounded()),
-        None,
     )
 }
 
@@ -279,7 +296,6 @@ impl SparqlHost {
 pub fn sparql_host_with(
     door: ikigai_script::sparql::SparqlDoor,
     ceiling: CeilingPolicy,
-    principal: Option<PrincipalStamper>,
 ) -> SparqlHost {
     let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
     let kernel_cell: Arc<std::sync::OnceLock<std::sync::Weak<Kernel>>> =
@@ -295,12 +311,9 @@ pub fn sparql_host_with(
             }
         })
     };
-    let mut config = SpaceConfig::new(Arc::clone(&backend), ceiling)
+    let config = SpaceConfig::new(Arc::clone(&backend), ceiling)
         .sparql(door)
         .on_change(hook);
-    if let Some(principal) = principal {
-        config = config.principal(principal);
-    }
     let queries = Arc::new(AtomicUsize::new(0));
     let store = CountingStore {
         inner: ikigai_store::space(ikigai_store::DurableStore::in_memory().expect("a store")),
@@ -330,12 +343,11 @@ pub fn sparql_host_with(
     }
 }
 
-/// A SPARQL host over `urn:iki:store:`, no ceiling, unstamped.
+/// A SPARQL host over `urn:iki:store:`, no ceiling.
 pub fn sparql_host() -> SparqlHost {
     sparql_host_with(
         ikigai_script::sparql::SparqlDoor::store(),
         ikigai_script::authority::same_for_all(Ceiling::unbounded()),
-        None,
     )
 }
 

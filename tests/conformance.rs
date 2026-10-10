@@ -66,6 +66,7 @@ fn suite(digest: &str, space: &Arc<ScriptSpace>) -> Suite {
         )
         .opt_out("whoami", None, "a test probe, not part of this crate")
         .opt_out("vault", None, "a test probe, not part of this crate")
+        .opt_out("fallback", None, "a test probe, not part of this crate")
         .fixture(Fixture::new("script", Verb::Source).binding("name", "walk"))
         .fixture(Fixture::new("script", Verb::Exists).binding("name", "walk"))
         .fixture(

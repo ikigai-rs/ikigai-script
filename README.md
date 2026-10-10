@@ -39,7 +39,8 @@ verbs, its caching, its golden threads and its trace are the kernel's, unchanged
   sub-requests are (a Lisp program opts in with `(cacheable …)`), so a pure public script
   answered a thousand times runs once. Republishing cuts the script's golden thread, and
   the cached answer goes with it.
-- **Running is a write.** `…:runs` records a run atom (who, as the host stamped it; which
+- **Running is a write.** `…:runs` records a run atom (who, the principal the runner's
+  capability names; which
   version; under exactly what capability; when; the outcome; the trace span when the host
   traced) and answers its IRI. A failed run is recorded too, and its error keeps its type
   and names the record.
@@ -82,10 +83,11 @@ must hold it. See "What the host must supply" for what that means for anonymous 
 ## Drafts are private
 
 A draft (`state=draft`, or `urn:script:eval save=`) is visible only to its **author** until it
-is published. The author is the principal the host stamps (see "What the host must supply"),
-the same value a publish records as the script's publisher, compared with what the host stamps
-for the reader: never an argument, so no caller can name itself the author. Seeing a draft
-needs the read (or run) grant AND authorship, so privacy only narrows what a grant reaches.
+is published. The author is the principal the writer's capability named (see "What the host
+must supply"), the same value a publish records as the script's publisher, and a reader is the
+author when their capability `acts_as` it: never an argument, so no caller can name itself the
+author. Seeing a draft needs the read (or run) grant AND authorship, so privacy only narrows
+what a grant reaches.
 
 - To any other caller holding the grant, a draft is **absent**, and told so exactly as a name
   nobody wrote is: `NotFound` with the same words, `Exists` false, no catalog row, its compiled
@@ -96,15 +98,19 @@ needs the read (or run) grant AND authorship, so privacy only narrows what a gra
   moves past it (fetching it by digest finds nothing), retiring a draft does not publish it,
   and once a version is published it is every reader's for good. Root sees every draft: it is
   the host's own authority, and holds the backend they are stored in.
-- An author's answer is **never cached**: the kernel keys its cache on the capability, and two
-  people holding the same capability are two principals.
+- Every answer is **cacheable**, the author's included: the kernel keys its cache on the
+  capability, and the capability carries the principal, so alice's cached draft is never served
+  to bob even when the rest of their grants are the same. (Before 0.2.0 the principal came from
+  a host stamper the cache could not see, and these answers were never cached.) Every answer,
+  a NotFound included, hangs from the script's golden thread, so a publish or retire cuts it.
 - A SPARQL query or plan that was never published has **no catalog entry of its own**. `Meta`
   is answered to anyone who can reach the door, and the script's own contract is made of its
   text (its parameters and leading comment), so a draft wears the generic contract until it is
   published.
-- ⚠ **A host that stamps no principal has no authors**: `UNSTAMPED` and `ANONYMOUS` name many
-  callers at once, so a draft written under either is root's alone, and a refusal to an
-  unstamped caller says so. The history in a published script's JSON record still lists each
+- ⚠ **A capability that names no principal has no authors**: a draft written under one is
+  recorded `UNSTAMPED`, and `UNSTAMPED` and `ANONYMOUS` name many callers at once, so a draft
+  written under either is root's alone, and a refusal to a caller whose capability names no
+  principal says so. The history in a published script's JSON record still lists each
   superseded draft's digest and who wrote it; never its content.
 
 ## The graph face
@@ -119,7 +125,7 @@ and SPARQL read them as one graph and two answers merge without renaming.
 <urn:script:{name}:version:{digest}>  prov:specializationOf  <urn:script:{name}>
 <urn:script:{name}:run:{id}>  a prov:Activity ;
     prov:used <urn:script:{name}:version:{digest}> ;          the version that ran
-    prov:wasAssociatedWith <principal> ;                      as the host stamped it (when an IRI)
+    prov:wasAssociatedWith <principal> ;                      as the door minted it (when an IRI)
     prov:startedAtTime "…"^^xsd:dateTime ; prov:endedAtTime "…"^^xsd:dateTime ;
     ik:outcome <urn:script:outcome:ok>                         or …:failed; absent while running
 ```
@@ -158,7 +164,6 @@ let ceiling: CeilingPolicy = Arc::new(move |name| {
 let kernel_cell: Arc<OnceLock<Weak<Kernel>>> = Arc::new(OnceLock::new());
 let cell = Arc::clone(&kernel_cell);
 let scripts = space(SpaceConfig::new(backend, ceiling)
-    .principal(Arc::new(|_inv| /* what your door authenticated */ "urn:example:me".into()))
     // SPARQL scripts, run against the store bound below.
     .sparql(SparqlDoor::store())
     // A published query is its own catalog entry: re-describe after every publish.
@@ -188,11 +193,15 @@ let _ = kernel_cell.set(Arc::downgrade(&kernel));
   library never reads the config home itself. **When the host changes a ceiling it cuts
   `urn:script:{name}:authority`**, or a cached result computed under the old ceiling is
   served until something else cuts it.
-- **The principal**, a function of the invocation (what the host's door authenticated),
-  recorded on every publish and run, and the identity a draft is private to. Never an
-  argument: a caller cannot name itself. The default records `urn:script:principal:unstamped`,
-  under which no caller is a draft's author (see "Drafts are private"); stamp
-  `urn:script:principal:anonymous` for a caller the door cannot identify.
+- **The principal**, minted by the host's door into the capability each request runs under:
+  `capability.with_principal("urn:example:person:alice")`, the `urn:cap:principal:<iri>`
+  convention of ikigai-core 0.1.93. It is recorded on every publish and run, and it is the
+  identity a draft is private to. Never an argument: a caller cannot name itself, and narrowing
+  a capability can never add or change a principal. A capability naming none (root, or a door
+  that minted nothing) records `urn:script:principal:unstamped`, under which no caller is a
+  draft's author (see "Drafts are private"); mint `urn:script:principal:anonymous` for a caller
+  the door cannot identify. (0.1.0 took a `SpaceConfig::principal` stamper instead; 0.2.0
+  removes it.)
 - **A grant for anonymous runs**, if it wants them: `urn:cap:script:run:public`,
   `urn:cap:script:read:public`, and `urn:cap:lisp`. ⚠ The last is not optional: a run is
   a sub-request to `urn:lisp:eval` under the runner's narrowed capability, and narrowing

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use common::*;
 use ikigai_core::{Capability, Error, Verb};
 use ikigai_script::authority::{
-    same_for_all, Ceiling, PrincipalStamper, ANONYMOUS, CAP_READ_PUBLIC, CAP_RUN_PUBLIC,
+    same_for_all, Ceiling, ANONYMOUS, CAP_READ_PUBLIC, CAP_RUN_PUBLIC, UNSTAMPED,
 };
 use ikigai_script::{MemoryBackend, Run};
 
@@ -252,7 +252,6 @@ fn the_host_ceiling_clamps() {
     let host = host_with(
         Arc::new(MemoryBackend::new()),
         same_for_all(Ceiling::scoped(["urn:cap:lisp"])),
-        None,
     );
     publish(
         &host.kernel,
@@ -287,7 +286,6 @@ fn a_host_that_fails_closed_runs_nothing() {
     let host = host_with(
         Arc::new(MemoryBackend::new()),
         same_for_all(Ceiling::nothing()),
-        None,
     );
     publish(&host.kernel, "pure", "(+ 1 2)", &[]);
     // Even the language is withheld, so the evaluator refuses the run.
@@ -310,7 +308,7 @@ fn the_ceiling_is_asked_per_script() {
             Ceiling::scoped(["urn:cap:lisp"])
         }
     });
-    let host = host_with(Arc::new(MemoryBackend::new()), policy, None);
+    let host = host_with(Arc::new(MemoryBackend::new()), policy);
     for name in ["trusted", "untrusted"] {
         publish(
             &host.kernel,
@@ -574,32 +572,46 @@ fn saving_a_draft_cuts_a_cached_read_of_the_script() {
 // ------------------------------------------------------------------ the record
 
 #[test]
-fn the_principal_is_the_hosts_never_the_callers() {
-    let stamper: PrincipalStamper = Arc::new(|inv| {
-        if inv.capability.allows("urn:cap:test:signed-in") {
-            "urn:test:person:brian".to_string()
-        } else {
-            ANONYMOUS.to_string()
-        }
-    });
-    let host = host_with(
-        Arc::new(MemoryBackend::new()),
-        same_for_all(Ceiling::unbounded()),
-        Some(stamper),
-    );
-    publish(&host.kernel, "job", "1", &[("public", "true")]);
-    // The caller claims to be someone; the record says what the host said.
+fn the_principal_is_the_capabilitys_never_the_callers() {
+    // The door mints who is calling into the capability; an argument claiming otherwise is
+    // never read.
+    let host = host();
+    let brian = "urn:test:person:brian";
     call(
         &host.kernel,
-        &anonymous(),
+        &publisher("job", &[]).with_principal(brian).unwrap(),
+        Verb::Sink,
+        "urn:script:job",
+        &[
+            ("content", "1"),
+            ("public", "true"),
+            ("principal", "urn:test:person:mallory"),
+        ],
+    )
+    .unwrap();
+    // The caller claims to be someone; the record says what the capability said.
+    call(
+        &host.kernel,
+        &anonymous().with_principal(ANONYMOUS).unwrap(),
         Verb::Sink,
         "urn:script:job:runs",
-        &[("principal", "urn:test:person:brian")],
+        &[("principal", brian)],
     )
     .unwrap();
     call(
         &host.kernel,
-        &runner("job", &["urn:cap:test:signed-in"]),
+        &runner("job", &[]).with_principal(brian).unwrap(),
+        Verb::Sink,
+        "urn:script:job:runs",
+        &[],
+    )
+    .unwrap();
+    // Root names no principal (it is the host's own authority), and neither does a
+    // capability its door minted nothing into.
+    ok(&host.kernel, Verb::Sink, "urn:script:job:runs", &[]);
+    call(
+        &host.kernel,
+        &runner("job", &[]),
         Verb::Sink,
         "urn:script:job:runs",
         &[],
@@ -616,9 +628,9 @@ fn the_principal_is_the_hosts_never_the_callers() {
         run.principal
     };
     assert_eq!(principal(1), ANONYMOUS);
-    assert_eq!(principal(2), "urn:test:person:brian");
-    // The publisher is stamped the same way: `publish` runs under root, which holds every
-    // scope, `signed-in` included.
+    assert_eq!(principal(2), brian);
+    assert_eq!(principal(3), UNSTAMPED);
+    assert_eq!(principal(4), UNSTAMPED);
     let record: serde_json::Value = serde_json::from_str(&ok(
         &host.kernel,
         Verb::Source,
@@ -626,7 +638,7 @@ fn the_principal_is_the_hosts_never_the_callers() {
         &[("as", "application/json")],
     ))
     .unwrap();
-    assert_eq!(record["publisher"], "urn:test:person:brian");
+    assert_eq!(record["publisher"], brian);
 }
 
 #[test]

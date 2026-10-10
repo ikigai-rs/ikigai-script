@@ -92,7 +92,7 @@ fn the_host_cuts_the_authority_thread_when_it_changes_a_ceiling() {
         let ceiling = Arc::clone(&ceiling);
         Arc::new(move |_| ceiling.lock().unwrap().clone())
     };
-    let host = host_with(Arc::new(MemoryBackend::new()), policy, None);
+    let host = host_with(Arc::new(MemoryBackend::new()), policy);
     publish(
         &host.kernel,
         "whoami",
@@ -449,4 +449,113 @@ fn a_public_version_is_not_served_from_the_cache_once_its_script_is_retired() {
         "{:?}",
         read(Verb::Source)
     );
+}
+
+/// Ledger #1079, the failure half of ledger #1076: a version's ABSENCE is its script's state
+/// too, so a composite that caches a fallback over a version's NotFound must be cut by the
+/// publish that ends the absence. The success side already hung from the script's thread;
+/// a NotFound carried only the version IRI's, which no write targets.
+#[test]
+fn a_cached_fallback_over_a_missing_version_is_cut_by_the_publish() {
+    let host = host();
+    let elsewhere = publish(&host.kernel, "elsewhere", "(+ 40 2)", &[]);
+    let digest = elsewhere.rsplit(":version:").next().unwrap().to_string();
+    let version = format!("urn:script:later:version:{digest}");
+    let fallback = || {
+        ok(
+            &host.kernel,
+            Verb::Source,
+            "urn:test:fallback",
+            &[("of", &version)],
+        )
+    };
+    let cached = || {
+        host.kernel.is_cached(
+            &request(Verb::Source, "urn:test:fallback", &[("of", &version)]),
+            &Capability::root(),
+        )
+    };
+    assert_eq!(fallback(), "fallback");
+    assert!(cached(), "the fallback over a miss is worth caching");
+    assert_eq!(publish(&host.kernel, "later", "(+ 40 2)", &[]), version);
+    assert!(
+        !cached(),
+        "the publish that wrote the version did not reach the fallback over its absence"
+    );
+    assert_eq!(fallback(), "(+ 40 2)");
+}
+
+/// The same, for a version that EXISTS but is someone else's draft: absent to the caller,
+/// and present once published, so the publish must cut that fallback too.
+#[test]
+fn a_cached_fallback_over_a_hidden_draft_version_is_cut_by_the_publish() {
+    let host = host();
+    let writer = cap(&["urn:cap:script:write:later", "urn:cap:lisp"]);
+    let draft = call(
+        &host.kernel,
+        &writer,
+        Verb::Sink,
+        "urn:script:later",
+        &[("content", "(+ 40 2)"), ("state", "draft")],
+    )
+    .unwrap();
+    let draft = draft.trim().to_string();
+    let reader = cap(&["urn:cap:script:read:later"]);
+    let fallback = || {
+        call(
+            &host.kernel,
+            &reader,
+            Verb::Source,
+            "urn:test:fallback",
+            &[("of", &draft)],
+        )
+        .unwrap()
+    };
+    let cached = || {
+        host.kernel.is_cached(
+            &request(Verb::Source, "urn:test:fallback", &[("of", &draft)]),
+            &reader,
+        )
+    };
+    assert_eq!(
+        fallback(),
+        "fallback",
+        "nobody's draft is absent to a reader"
+    );
+    assert!(cached());
+    publish(&host.kernel, "later", "(+ 40 2)", &[]);
+    assert!(
+        !cached(),
+        "the publish did not reach the fallback over the hidden draft"
+    );
+    assert_eq!(fallback(), "(+ 40 2)");
+}
+
+/// The compiled form and a run as a read answer NotFound for a script nobody may see yet,
+/// and that absence is the script's state as well: a publish must reach a fallback over it.
+#[test]
+fn a_cached_fallback_over_a_missing_compiled_form_or_result_is_cut_by_the_publish() {
+    for part in ["compiled", "result"] {
+        let host = host();
+        let target = format!("urn:script:soon:{part}");
+        let fallback = || {
+            ok(
+                &host.kernel,
+                Verb::Source,
+                "urn:test:fallback",
+                &[("of", &target)],
+            )
+        };
+        let cached = || {
+            host.kernel.is_cached(
+                &request(Verb::Source, "urn:test:fallback", &[("of", &target)]),
+                &Capability::root(),
+            )
+        };
+        assert_eq!(fallback(), "fallback", "{part}");
+        assert!(cached(), "{part}");
+        publish(&host.kernel, "soon", "(+ 40 2)", &[]);
+        assert!(!cached(), "{part}: the publish did not reach the fallback");
+        assert_ne!(fallback(), "fallback", "{part}");
+    }
 }

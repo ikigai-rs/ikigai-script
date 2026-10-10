@@ -35,7 +35,6 @@ fn host_over(dir: &PathBuf) -> Host {
     host_with(
         Arc::new(DirBackend::open(dir).expect("a scratch directory")),
         same_for_all(Ceiling::unbounded()),
-        None,
     )
 }
 
@@ -174,7 +173,6 @@ fn an_editor_who_got_there_first_wins_and_the_writer_is_told() {
     let host = host_with(
         Arc::new(DirBackend::open(&scratch.0).unwrap()),
         same_for_all(Ceiling::unbounded()),
-        None,
     );
     publish(&host.kernel, "shared", "1", &[]);
     // A writer reads the head…
