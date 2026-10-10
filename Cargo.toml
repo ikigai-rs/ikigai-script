@@ -100,8 +100,27 @@ ikigai-vocab = "0.1.47"
 # The store a SPARQL script runs against in the tests, in memory, bound exactly as a host binds
 # it: every run is a sub-request to its graph-scoped doors. 0.2.7 is where caller SPARQL is
 # bounded before the parser sees it (ledger #915), the behavior `src/limits.rs` copies.
-# ⚠ `"0.2.7"` is `<0.3.0`.
-ikigai-store = "0.2.7"
+# **0.2.10 since ledger #1085**: where every store door refuses SERVICE and LOAD in every build
+# (ledger #1083), and where the `http-client` feature `http-client-probe` below turns on exists.
+# The library still never links the store: this crate parses SPARQL and refuses SERVICE and LOAD
+# itself, and the store's refusal is the second layer, which the egress test pins too.
+# ⚠ `"0.2.10"` is `>=0.2.10, <0.3.0`.
+ikigai-store = "0.2.10"
+# Only for the egress test's CONTROL (`tests/sparql_service_egress.rs`): oxigraph's own
+# evaluator, with no ikigai layer, really does reach a local stub in the probe build, so "the
+# stub saw nothing" is not vacuous. No default features: the probe feature adds the client.
+# 0.5.11 is what ikigai-store 0.2.10 resolves to and the oxigraph spargebra 0.4.7 belongs to.
+# ⚠ `"0.5.11"` is `<0.6.0`: move it with spargebra.
+oxigraph = { version = "0.5.11", default-features = false }
+
+[features]
+# TEST-ONLY. Compiles oxigraph's HTTP client into the test build, which is what a host gets when
+# some other crate in its graph enables `oxigraph/http-client` (rudof_rdf does, through
+# ikigai-shacl, so ikigai-cli has it; ledger #1083). `tests/sparql_service_egress.rs` runs under
+# it in CI's `features:` job and proves a SERVICE or LOAD script still reaches no network.
+# It names a DEV-dependency's feature, so turning it on changes nothing a consumer of this
+# library links: the library has no HTTP client and no evaluator, with or without it.
+http-client-probe = ["ikigai-store/http-client", "oxigraph/http-client"]
 
 # Every Lisp evaluation builds its own Steel engine, and an unoptimized Steel takes about
 # a second to build one where an optimized one takes ~60 ms (ikigai-lisp measured it).

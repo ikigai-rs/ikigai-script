@@ -316,7 +316,12 @@ store sees. Where that one dataset would change the answer, the query is refused
 instead of answered differently: a query reading the default graph (a bare pattern, or a
 DESCRIBE) must name its whole dataset with `FROM`, and may not also read a `GRAPH ?g`. An update
 writes exactly one named graph and reads no other; `LOAD`, `SERVICE`, `DROP ALL` and a write to
-the default graph are refused. The text is checked against the store's bound
+the default graph are refused. `SERVICE` is refused in a query too (anywhere, `FILTER EXISTS` and
+a variable service name included), at publish and again at every run, so no script reaches the
+network even in a host whose graph compiles in oxigraph's HTTP client (`ikigai-cli` does, through
+rudof). `tests/sparql_service_egress.rs` proves it with a local stub under the test-only feature
+`http-client-probe`, which enables nothing a consumer links. Host the doors on ikigai-store 0.2.10
+or later, which refuses both at its own doors as a second layer. The text is checked against the store's bound
 (`src/limits.rs`, copied from ikigai-store) before it is parsed here at all.
 
 ### Faces
