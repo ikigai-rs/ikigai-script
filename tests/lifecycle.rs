@@ -601,12 +601,12 @@ fn a_cached_fallback_over_a_run_not_yet_recorded_is_cut_by_the_run() {
     assert!(fallback_of(&host, &record).starts_with(&record));
 }
 
-/// ⚠ A FAILED run is recorded too, but the kernel cuts a Sink's target only when the Sink
-/// SUCCEEDS (ikigai-core 0.1.93, `Kernel::issue`), and an endpoint cannot cut a thread itself.
-/// So a fallback over the record of a run that then fails stays cached. Pinned so a core
-/// change that closes it turns this red and the assertion flips.
+/// A FAILED run is recorded too, so its record's absence is state it wrote: the fallback over
+/// that NotFound must be cut by the failed run as well. The kernel cuts a Sink's target when
+/// the endpoint RAN and then failed (ikigai-core 0.1.95, ledger #1105); a refusal before
+/// dispatch cuts nothing, and records nothing either.
 #[test]
-fn a_failed_run_does_not_yet_cut_a_fallback_over_its_record() {
+fn a_failed_run_cuts_a_fallback_over_its_record() {
     let (host, record) = fallback_over_run_one("broken", "(car 1)");
     let ran = call(
         &host.kernel,
@@ -616,11 +616,9 @@ fn a_failed_run_does_not_yet_cut_a_fallback_over_its_record() {
         &[],
     );
     assert!(ran.is_err(), "{ran:?}");
-    // Recorded: a direct read finds it (a top-level NotFound is never cached).
-    assert!(ok(&host.kernel, Verb::Source, &record, &[]).starts_with(&record));
     assert!(
-        fallback_cached(&host, &record),
-        "a failed Sink now cuts its target: flip this test and drop the gap from the README"
+        !fallback_cached(&host, &record),
+        "the failed run that recorded {record} did not reach the fallback"
     );
-    assert_eq!(fallback_of(&host, &record), "fallback");
+    assert!(fallback_of(&host, &record).starts_with(&record));
 }
