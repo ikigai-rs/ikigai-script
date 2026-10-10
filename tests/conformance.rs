@@ -23,12 +23,24 @@
 //!   name the catalog could hang from.
 //! - **`urn:lisp:eval` is in this kernel** because a run composes over it; it is
 //!   `ikigai-lisp`'s to conform, and its own suite does.
+//! - **`space(config)` is HOST-named** (`SPACE-NAME`, ledger #987): its doors are fixed,
+//!   but what they answer is the backend, ceiling and SPARQL door it was handed, and every
+//!   published SPARQL script or plan adds entries of its own. A name is a cache claim (same
+//!   name, same doors), and only the host knows which instance it passed in, so the crate
+//!   claims none and the suite holds it to that: the space the kernel binds is the value
+//!   declared here.
 
 mod common;
+
+use std::sync::Arc;
 
 use common::*;
 use ikigai_conformance::{Fixture, Suite};
 use ikigai_core::Verb;
+use ikigai_script::ScriptSpace;
+
+/// What findings name `space(config)` by, and the report line that says it was checked.
+const SPACE_LABEL: &str = "ikigai_script::space(config)";
 
 fn seeded() -> (Host, String) {
     let host = host();
@@ -43,8 +55,9 @@ fn seeded() -> (Host, String) {
     (host, digest)
 }
 
-fn suite(digest: &str) -> Suite {
+fn suite(digest: &str, space: &Arc<ScriptSpace>) -> Suite {
     Suite::new()
+        .host_named_space(SPACE_LABEL, Arc::clone(space))
         .opt_out(
             "eval",
             None,
@@ -95,9 +108,17 @@ fn suite(digest: &str) -> Suite {
 #[test]
 fn conforms() {
     let (host, digest) = seeded();
-    let report = suite(&digest).run_blocking(&host.kernel);
+    let report = suite(&digest, &host.space).run_blocking(&host.kernel);
     println!("{report}");
     assert!(report.is_clean(), "{report}");
+    // The positive half of SPACE-NAME: the declaration reached the check, and the space
+    // the kernel binds claims no name.
+    assert!(
+        report
+            .to_string()
+            .contains(&format!("space: {SPACE_LABEL} host-named\n")),
+        "{report}"
+    );
 }
 
 /// ★ The positive half: a clean report over a walk that reached nothing would look
@@ -105,7 +126,7 @@ fn conforms() {
 #[test]
 fn the_walk_reaches_every_resource_this_crate_binds() {
     let (host, digest) = seeded();
-    let report = suite(&digest).run_blocking(&host.kernel);
+    let report = suite(&digest, &host.space).run_blocking(&host.kernel);
     let mut walked: Vec<&str> = report
         .walked
         .iter()
@@ -181,10 +202,10 @@ fn sparql_seeded() -> (SparqlHost, String) {
     (host, digest)
 }
 
-fn sparql_suite(digest: &str) -> Suite {
+fn sparql_suite(digest: &str, space: &Arc<ScriptSpace>) -> Suite {
     STORE_IDS
         .iter()
-        .fold(suite(digest), |suite, id| {
+        .fold(suite(digest, space), |suite, id| {
             suite.opt_out(
                 *id,
                 None,
@@ -209,7 +230,7 @@ fn sparql_suite(digest: &str) -> Suite {
 #[test]
 fn a_host_with_sparql_scripts_conforms() {
     let (host, digest) = sparql_seeded();
-    let report = sparql_suite(&digest).run_blocking(&host.kernel);
+    let report = sparql_suite(&digest, &host.space).run_blocking(&host.kernel);
     println!("{report}");
     assert!(report.is_clean(), "{report}");
     let mut walked: Vec<&str> = report
@@ -270,7 +291,7 @@ fn plan_seeded() -> (PlanHost, String) {
     (host, digest)
 }
 
-fn plan_suite(digest: &str) -> Suite {
+fn plan_suite(digest: &str, space: &Arc<ScriptSpace>) -> Suite {
     [
         (
             "plan-eval",
@@ -288,7 +309,7 @@ fn plan_suite(digest: &str) -> Suite {
         ("host", "a test probe, not part of this crate"),
     ]
     .into_iter()
-    .fold(suite(digest), |suite, (id, why)| {
+    .fold(suite(digest, space), |suite, (id, why)| {
         suite.opt_out(id, None, why)
     })
     .fixture(Fixture::new("script-walkp-result", Verb::Source).arg("who", "conformance"))
@@ -300,7 +321,7 @@ fn plan_suite(digest: &str) -> Suite {
 #[test]
 fn a_host_with_plan_scripts_conforms() {
     let (host, digest) = plan_seeded();
-    let report = plan_suite(&digest).run_blocking(&host.kernel);
+    let report = plan_suite(&digest, &host.space).run_blocking(&host.kernel);
     println!("{report}");
     assert!(report.is_clean(), "{report}");
     let mut walked: Vec<&str> = report
