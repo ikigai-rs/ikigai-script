@@ -84,6 +84,7 @@
 pub mod authority;
 pub mod backend;
 pub mod endpoints;
+pub mod graph;
 pub mod limits;
 pub mod model;
 pub mod name;

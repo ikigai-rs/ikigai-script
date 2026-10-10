@@ -107,6 +107,33 @@ needs the read (or run) grant AND authorship, so privacy only narrows what a gra
   unstamped caller says so. The history in a published script's JSON record still lists each
   superseded draft's digest and who wrote it; never its content.
 
+## The graph face
+
+The catalog and every run record also answer `as=text/turtle`: PROV-O and the shared
+vocabulary, every node an IRI this crate already names (no blank nodes), so the visualizers
+and SPARQL read them as one graph and two answers merge without renaming.
+
+```text
+<urn:script:catalog>  dcterms:hasPart  <urn:script:{name}>              one per catalog row
+<urn:script:{name}>   dcterms:identifier "{name}" ; ik:contentHash "sha256:…"   its head version
+<urn:script:{name}:version:{digest}>  prov:specializationOf  <urn:script:{name}>
+<urn:script:{name}:run:{id}>  a prov:Activity ;
+    prov:used <urn:script:{name}:version:{digest}> ;          the version that ran
+    prov:wasAssociatedWith <principal> ;                      as the host stamped it (when an IRI)
+    prov:startedAtTime "…"^^xsd:dateTime ; prov:endedAtTime "…"^^xsd:dateTime ;
+    ik:outcome <urn:script:outcome:ok>                         or …:failed; absent while running
+```
+
+A run reaches its script through the version it used, so "every run of this script" and "its
+last run" are queries rather than terms. Each field the graph carries is pinned against the
+JSON face as an RDF term (`tests/turtle.rs`), with the `ik:` ranges read from the published
+vocabulary.
+
+⚠ **The graph carries less than the JSON**, because the vocabulary has no term for the rest and
+this crate does not invent `ik:` terms: a script's state, public flag, language, declared and
+granted capability and exclusions; a run's capability, failure kind and message, result, and
+trace span. Use `as=application/json` for those.
+
 ## Mounting it
 
 A host library: no binary. A host mounts `space(config)` beside the evaluator its scripts
@@ -400,7 +427,8 @@ A). When it is published, the suite should run once against the real space too.
 - **Triggers** (startup, timers, tuplespace drops, thread cuts, ledger events, webhooks),
   **bindings** (a script as an endpoint, transreptor or overlay), the **stepper**, and
   **signed elevation**: later phases of the design.
-- **A Turtle face**: every record is `text/plain` and `application/json`.
+- **A graph face for the script and its versions**: they are `text/plain` and
+  `application/json` only (the catalog and run records have Turtle).
 - **For SPARQL**: the SPARQL Protocol face over `urn:script:eval` (ledger #955; `eval` refuses
   `language=sparql` until then); list-valued parameters (an `IN (…)` or `VALUES` over several
   terms); an update whose graph is a parameter; `urn:sparql:*` as a door (its per-query space
