@@ -45,7 +45,37 @@ pub const CATALOG_IRI: &str = "urn:script:catalog";
 ///   [`crate::authority::CAP_READ_PUBLIC`]: a script called `public` would have its
 ///   per-script grant spelled exactly like the grant a host gives its anonymous
 ///   principal.
-pub const RESERVED: [&str; 3] = ["eval", "catalog", "public"];
+/// - `outcome` and `principal` begin IRIs this crate mints and nothing resolves:
+///   [`crate::graph::OUTCOME_OK`] (`urn:script:outcome:ok`) and the principals
+///   [`crate::authority::UNSTAMPED`] and [`crate::authority::ANONYMOUS`]
+///   (`urn:script:principal:…`). Everything below `urn:script:{name}:` is that script's,
+///   so a script called `principal` would own, by the naming rule, an IRI that names
+///   who ran it (ledger #1076).
+///
+/// ⚠ A script already stored under a name reserved later is unreachable, not migrated:
+/// every door refuses its name as `InvalidArgument`, [`crate::DirBackend`] leaves it out of
+/// the catalog, and its files stay where they were. Rename its entries in the backend to
+/// get it back.
+///
+/// ```
+/// use ikigai_script::{authority, graph, name};
+///
+/// // Every IRI this crate mints directly under `urn:script:` starts with a reserved name,
+/// // so no script can be named into one.
+/// for minted in [
+///     name::EVAL_IRI,
+///     name::CATALOG_IRI,
+///     graph::OUTCOME_OK,
+///     graph::OUTCOME_FAILED,
+///     authority::UNSTAMPED,
+///     authority::ANONYMOUS,
+/// ] {
+///     let first = minted[name::PREFIX.len()..].split(':').next().unwrap();
+///     assert!(name::RESERVED.contains(&first), "{minted}");
+///     assert!(name::validate(first).is_err(), "{minted}");
+/// }
+/// ```
+pub const RESERVED: [&str; 5] = ["eval", "catalog", "public", "outcome", "principal"];
 
 /// The longest name.
 pub const MAX_NAME: usize = 64;
