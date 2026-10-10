@@ -8,6 +8,8 @@
 
 #![allow(dead_code)] // each suite uses a different subset of these helpers
 
+pub mod plan;
+
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -335,4 +337,115 @@ pub fn seed(kernel: &Kernel, update: &str) {
         "urn:iki:store:update",
         &[("content", update)],
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// Plans: a host with the plan doors (a test double of part A's contract), and probes
+// ---------------------------------------------------------------------------------------
+
+/// The scope `urn:test:greet` declares (so the kernel enforces it).
+pub const CAP_GREET: &str = "urn:cap:test:greet";
+/// The family `urn:test:host` declares: "holds some `urn:cap:test:net:<host>`". It checks
+/// the exact `urn:cap:test:net:<host>` for its `host` argument itself, as `ikigai-http`
+/// checks a host rule.
+pub const CAP_NET: &str = "urn:cap:test:net:*";
+
+/// The probes a plan's steps reach, beside [`probes`]:
+///
+/// - `urn:test:greet` (Source, requires [`CAP_GREET`]): `hello, {who}`, cacheable.
+/// - `urn:test:host` (Source, requires the family [`CAP_NET`]): `reached {host}`, refused
+///   unless the capability holds `urn:cap:test:net:{host}` exactly.
+fn plan_probes() -> EndpointSpace {
+    let greet = FnEndpoint::new("greet", |inv: &Invocation<'_>| {
+        let who = inv.inline_str("who").unwrap_or("nobody");
+        Ok(Representation::new(
+            ReprType::new("text/plain"),
+            format!("hello, {who}").into_bytes(),
+        )
+        .cacheable())
+    })
+    .with_description(
+        Description::new("greet")
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(CAP_GREET)
+            .output("text/plain"),
+    );
+    let host = FnEndpoint::new("host", |inv: &Invocation<'_>| {
+        let host = inv.inline_str("host")?;
+        let exact = format!("urn:cap:test:net:{host}");
+        if !inv.capability.allows(&exact) {
+            return Err(Error::Denied(format!("reaching {host} needs `{exact}`")));
+        }
+        Ok(Representation::new(
+            ReprType::new("text/plain"),
+            format!("reached {host}").into_bytes(),
+        ))
+    })
+    .with_description(
+        Description::new("host")
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .requires(CAP_NET)
+            .output("text/plain"),
+    );
+    EndpointSpace::new()
+        .bind(Exact::new("urn:test:greet"), greet)
+        .bind(Exact::new("urn:test:host"), host)
+}
+
+/// A host whose scripts may be plans: scripts, the plan doors (the double, `urn:plan:eval`
+/// counted), Lisp, and the probes. The change hook is wired as a host wires it.
+pub struct PlanHost {
+    pub kernel: Arc<Kernel>,
+    pub backend: Arc<dyn Backend>,
+    evals: Arc<AtomicUsize>,
+}
+
+impl PlanHost {
+    /// How many times `urn:plan:eval` has run.
+    pub fn evals(&self) -> usize {
+        self.evals.load(Ordering::SeqCst)
+    }
+}
+
+pub fn plan_host_with(ceiling: CeilingPolicy) -> PlanHost {
+    let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
+    let kernel_cell: Arc<std::sync::OnceLock<std::sync::Weak<Kernel>>> =
+        Arc::new(std::sync::OnceLock::new());
+    let hook: ikigai_script::endpoints::ChangeHook = {
+        let cell = Arc::clone(&kernel_cell);
+        Arc::new(move |_name: &str| {
+            if let Some(kernel) = cell.get().and_then(std::sync::Weak::upgrade) {
+                kernel.cut(ikigai_core::BINDINGS_THREAD);
+            }
+        })
+    };
+    let config = SpaceConfig::new(Arc::clone(&backend), ceiling).on_change(hook);
+    let evals = Arc::new(AtomicUsize::new(0));
+    let lisp = EndpointSpace::new().bind(Exact::new("urn:lisp:eval"), ikigai_lisp::eval());
+    let root = Fallback::new(vec![
+        Arc::new(ikigai_script::space(config)) as Arc<dyn Space>,
+        Arc::new(plan::doors(Arc::clone(&evals))) as Arc<dyn Space>,
+        Arc::new(lisp) as Arc<dyn Space>,
+        Arc::new(probes()) as Arc<dyn Space>,
+        Arc::new(plan_probes()) as Arc<dyn Space>,
+    ]);
+    let kernel = Arc::new(
+        Kernel::with_meta_renderer(Arc::new(root), Arc::new(ikigai_vocab::TurtleRenderer))
+            .with_clock(Arc::new(TickingClock::default())),
+    );
+    kernel_cell
+        .set(Arc::downgrade(&kernel))
+        .unwrap_or_else(|_| unreachable!("set once"));
+    PlanHost {
+        kernel,
+        backend,
+        evals,
+    }
+}
+
+/// A plan host with no ceiling.
+pub fn plan_host() -> PlanHost {
+    plan_host_with(ikigai_script::authority::same_for_all(Ceiling::unbounded()))
 }

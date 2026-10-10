@@ -17,8 +17,14 @@ urn:script:eval                      Sink                       run supplied cod
 urn:script:catalog                   Source                     every script the caller may read
 ```
 
-A published SPARQL query is also its OWN entry in the host's catalog: `urn:script:{name}:result`
-and `…:runs` with the query's declared parameters as their arguments (see "Queries as scripts").
+A published SPARQL query or plan is also its OWN entry in the host's catalog:
+`urn:script:{name}:result` and `…:runs` with its declared parameters as their arguments (see
+"Queries as scripts" and "Plans as scripts").
+
+**Which language?** When assembling anything, prefer **a query, then a plan, then Lisp.** A
+query and a plan both derive their authority from what they name and are checked before they
+run; Lisp declares its authority and can do anything its capability allows, in any order. Use
+Lisp for control flow a plan cannot express, and preferably as one step inside a plan.
 
 ## Why resources
 
@@ -279,6 +285,83 @@ the default graph are refused. The text is checked against the store's bound
   anyone who can reach the door can learn a published query's parameter names and types (not
   its text, which stays behind the read grant). The catalog itself needs the kernel's inspect
   grant, and the action manifold offers a private query only to holders of its run grant.
+
+## Plans as scripts
+
+A plan (an `ik:Process` graph in the process vocabulary, Turtle) is a script whose language is
+`plan`. It is the most analyzable language there is: finite (no conditionals or loops; a branch
+is a step that calls a language), so it is validated before it is stored and its authority is
+derived rather than declared. Three host doors do the work, each reached by sub-request, so
+this crate links no plan runner:
+
+```text
+urn:plan:validate   the SHACL report against the vocabulary's shapes, plus the executor's checks
+urn:plan:requires   the capability each step's target contract requires (read with Meta: nothing runs)
+urn:plan:eval       run the plan: every step a sub-request under the caller's capability
+```
+
+```text
+sink urn:script:hello language=plan content='
+# Greet someone.
+@prefix ik: <https://ikigai-rs.dev/ns#> .
+<urn:plan:hello> a ik:Process ; ik:input <urn:plan:hello:input:who> ;
+    ik:step <urn:plan:hello:step:1> ; ik:result <urn:plan:hello:step:1> .
+<urn:plan:hello:input:who> ik:inputName "who" ; ik:required false ; ik:default "world" .
+<urn:plan:hello:step:1> a ik:Step ; ik:verb "Source" ; ik:resolves <urn:example:greet> ;
+    ik:argument <urn:plan:hello:step:1:arg:who> .
+<urn:plan:hello:step:1:arg:who> a ik:Argument ; ik:inputName "who" ;
+    ik:ref <urn:plan:hello:var:who> .'
+
+source urn:script:hello:result who=brian
+```
+
+**Publishing validates.** `urn:plan:validate` runs first, and a plan that does not conform is
+refused (`InvalidArgument` on `content`) naming every shape it broke, the node and the shape's
+message, e.g. `urn:ikigai:shape:step at <…:step:2>: a step is fed by at most one of
+ik:pipeFrom, ik:mapOver, ik:forkOf`. Nothing is stored.
+
+**Authority is derived.** `urn:plan:requires` reads each step's target contract and answers what
+it requires (`Description::required_scopes` for the step's verb). The union is stored with the
+version, and a `requires=` that says anything else is refused, naming the derived set. A step
+whose target resolves nowhere makes the derivation incomplete, and the publish is refused,
+naming the step: storing the rest would store a floor as the requirement. The phase-1 rule
+holds on top: a run gets the derived set, narrowed to what the publisher held at publish and
+the host's ceiling allows, intersected with the runner's own capability, and each step then
+meets its own target's floor inside the evaluator. A plan's runner needs no language grant.
+The set is derived at PUBLISH: if a step's target later asks for more, that step is refused
+(fail closed) until the plan is republished and derived again.
+
+**Read or write, from the steps.** A plan whose every step is a `Source`, `Exists` or `Meta`
+runs as a READ at `…:result`, cacheable exactly as far as its least cacheable step (a republish
+cuts it). Any `Sink` or `Delete` step anywhere in the graph makes it a WRITE: `…:result` refuses
+it, naming `…:runs`, where every run is recorded. Decided from the parsed plan, never from an
+argument.
+
+**Its parameters** are its `ik:input` nodes: arguments of its own `…:result` and `…:runs`, with
+their `ik:class`, `ik:default` and `ik:summary`. A run refuses an argument the plan does not
+declare and a required one with no default before anything runs; through `…:runs` they may
+also arrive as one JSON object piped as `content`. `as=` is passed to the evaluator, which
+transrepts the result or refuses. `in`, `as`, `name` and `content` cannot be parameter names.
+
+**A derived family** (a step whose target declares `urn:cap:net:*`, "holds some grant under this
+prefix") is stored as the publisher's own grants under it, or, for a root publisher, as the
+family, which each run turns into the RUNNER's grants under it that the ceiling allows. A root
+runner cannot be enumerated, so it gets the members the ceiling names; under no ceiling it keeps
+the bare family, which the kernel's floor admits and the target's own rule (a host, a path)
+refuses. A host that wants a root-published plan with such a step to run under root lists the
+members in that script's ceiling.
+
+### What a host supplies for plans
+
+Bind the three doors (`ikigai-engine`'s plan space, which needs `urn:shacl:validate` beside it),
+and wire `SpaceConfig::on_change` as for queries: each published plan is its own catalog entry.
+Without the doors, `language=plan` is refused (`this host takes no plans`). A plan typed ad hoc
+runs at `urn:plan:eval` itself, under the caller's own capability: `urn:script:eval` points
+there rather than being a second door onto it.
+
+⚠ **Tested against a test double.** The doors ship in `ikigai-engine` 0.1.44, which is not
+published yet, so `tests/common/plan.rs` is a double honoring their contract (ledger #956, part
+A). When it is published, the suite should run once against the real space too.
 
 ## Not in this version
 

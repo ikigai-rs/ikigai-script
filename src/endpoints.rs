@@ -26,6 +26,7 @@ use crate::model::{
     self, Event, Head, Language, Outcome, Run, State, Version, MAX_RECORDED_RESULT, SCHEMA,
 };
 use crate::name::{self, CATALOG_IRI, EVAL_IRI};
+use crate::plan;
 use crate::sparql::{self, Analysis, Form, Parameter, SparqlDoor, Value, CAP_READ_GRAPH};
 
 const PLAIN: &str = "text/plain";
@@ -389,7 +390,7 @@ impl Endpoint for ScriptEndpoint {
                 };
                 Ok(repr.cacheable())
             }
-            Verb::Sink => publish(inv, shared, &name),
+            Verb::Sink => publish(inv, shared, &name).await,
             Verb::Delete => retire(inv, shared, &name),
             other => Err(unsupported("script", other)),
         }
@@ -447,8 +448,9 @@ impl Endpoint for ScriptEndpoint {
                     .input(
                         ArgSpec::new("language")
                             .summary(
-                                "The script's language: `lisp`, or `sparql` (a query or \
-                                 update, when the host mounts a SPARQL door).",
+                                "The script's language: `lisp`, `sparql` (a query or update, \
+                                 when the host mounts a SPARQL door), or `plan` (an \
+                                 ik:Process graph, when the host binds the plan doors).",
                             )
                             .class(XSD_STRING)
                             .one_of(Language::ALL.map(Language::as_str))
@@ -461,8 +463,9 @@ impl Endpoint for ScriptEndpoint {
                                 "Whitespace-separated `urn:cap:` grants the script needs to \
                                  run. Lisp: the language's capability is added; exact grants \
                                  only, no wildcards, no exclusions. SPARQL: DERIVED from the \
-                                 graphs the text names, so omit it; one that says anything \
-                                 else is refused, naming the derived set.",
+                                 graphs the text names; a plan: DERIVED from its steps' \
+                                 contracts. For both, omit it: one that says anything else \
+                                 is refused, naming the derived set.",
                             )
                             .class(XSD_STRING)
                             .optional(),
@@ -516,7 +519,7 @@ impl Endpoint for ScriptEndpoint {
     }
 }
 
-fn publish(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Result<Representation> {
+async fn publish(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Result<Representation> {
     require(inv, &cap_write(name), "publishing a script")?;
     let source = inv.inline_str("content")?;
     let language = optional(inv, "language")?
@@ -533,6 +536,15 @@ fn publish(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Result<Rep
             requires
         }
         Language::Sparql => derived_requires(inv, shared, source)?,
+        Language::Plan => {
+            // Validated by the host's validator first, so a malformed plan is refused
+            // naming the shape it broke; then read for what this crate decides itself;
+            // then its authority derived from its steps' contracts.
+            plan::check_bound(source)?;
+            plan::validate(inv, source).await?;
+            plan::analyze(source)?;
+            plan::derive(inv, source, optional(inv, "requires")?).await?
+        }
     };
     let public = optional(inv, "public")?
         .map(|v| parse_bool("public", v))
@@ -805,6 +817,9 @@ pub struct Prepared {
     /// For a SPARQL script: its form, parameters and graphs, read from the parsed text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sparql: Option<Analysis>,
+    /// For a plan: its process, its steps' verbs (read or write) and its parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<plan::Analysis>,
 }
 
 struct CompiledEndpoint {
@@ -830,13 +845,18 @@ impl Endpoint for CompiledEndpoint {
             &name,
         )?;
         let version = head_version(&self.shared, &head)?;
-        let (evaluator, analysis) = match version.language {
-            Language::Lisp => (LISP_EVAL.to_string(), None),
+        let (evaluator, analysis, plan_analysis) = match version.language {
+            Language::Lisp => (LISP_EVAL.to_string(), None, None),
             Language::Sparql => {
                 let door = door(&self.shared)?;
                 let analysis = sparql::analyze(&version.source, door)?;
-                (door.query_iri(analysis.form), Some(analysis))
+                (door.query_iri(analysis.form), Some(analysis), None)
             }
+            Language::Plan => (
+                plan::EVAL.to_string(),
+                None,
+                Some(plan::analyze(&version.source)?),
+            ),
         };
         let prepared = Prepared {
             schema: SCHEMA,
@@ -851,6 +871,7 @@ impl Endpoint for CompiledEndpoint {
             public: head.public,
             state: head.state,
             sparql: analysis,
+            plan: plan_analysis,
             name: name.clone(),
         };
         // ★ Hung from the SCRIPT's thread, which every publish and retire cuts (the kernel
@@ -870,7 +891,8 @@ impl Endpoint for CompiledEndpoint {
             .title("A script's compiled form")
             .summary(
                 "The head version prepared for its evaluator, with the authority it runs \
-                 under (and, for SPARQL, its form, parameters and graphs): cached, and cut \
+                 under (and, for SPARQL, its form, parameters and graphs; for a plan, its \
+                 steps' verbs and its parameters): cached, and cut \
                  whenever the script is republished or retired. Readable by a holder of the \
                  script's read OR run grant (a run reads its program here).",
             )
@@ -983,7 +1005,7 @@ struct Planned {
 }
 
 /// The run's sub-request, for whichever language the script is in.
-async fn plan(
+async fn prepare_request(
     inv: &Invocation<'_>,
     shared: &SpaceConfig,
     prepared: &Prepared,
@@ -1006,7 +1028,56 @@ async fn plan(
             })
         }
         Language::Sparql => plan_sparql(inv, shared, prepared, keep, ceiling, through).await,
+        Language::Plan => plan_eval_request(inv, prepared, keep, ceiling, through),
     }
+}
+
+/// A plan run: refuse a write through the read door, take the plan's parameters, turn a
+/// root publisher's derived families into exact grants, and address `urn:plan:eval`.
+///
+/// The plan's steps then run as `urn:plan:eval`'s sub-requests under exactly the narrowed
+/// capability, and each meets its own target's floor there: a step the run may not take is
+/// refused by the kernel at that step, typed, and arrives here unchanged.
+fn plan_eval_request(
+    inv: &Invocation<'_>,
+    prepared: &Prepared,
+    keep: BTreeSet<String>,
+    ceiling: &Ceiling,
+    through: Door,
+) -> Result<Planned> {
+    let name = &prepared.name;
+    let analysis = prepared.plan.as_ref().ok_or_else(|| {
+        Error::Endpoint(format!(
+            "urn:script:{name}:compiled carries no plan analysis"
+        ))
+    })?;
+    if through == Door::Result && analysis.mutates() {
+        let writers: Vec<String> = analysis
+            .steps
+            .iter()
+            .filter(|s| s.mutates())
+            .map(|s| format!("<{}> ({} <{}>)", s.iri, s.verb, s.resolves))
+            .collect();
+        return Err(Error::InvalidArgument {
+            name: "name".to_string(),
+            detail: format!(
+                "urn:script:{name} is a plan that writes ({}), so it is not a read: run it with \
+                 a Sink to urn:script:{name}:runs",
+                writers.join(", ")
+            ),
+        });
+    }
+    let declared: Vec<(&str, bool)> = analysis
+        .parameters
+        .iter()
+        .map(|p| (p.name.as_str(), p.must_be_given()))
+        .collect();
+    let values = given_parameters(inv, name, &declared, through)?;
+    let face = optional(inv, "as")?;
+    Ok(Planned {
+        request: plan::eval_request(&prepared.program, &values, face),
+        keep: plan::expand_families(keep, inv.capability, ceiling),
+    })
 }
 
 /// A SPARQL run: bind the parameters into the parsed query, work out its dataset and the
@@ -1197,26 +1268,54 @@ fn sparql_face(inv: &Invocation<'_>, form: Form) -> Result<&'static str> {
 
 /// The run's parameter values, each checked against its declared type.
 ///
-/// Named arguments, or (through `…:runs`) a JSON object piped as `content`. A missing
-/// required parameter is `MissingArgument`; a value that is not of its type, a parameter
-/// given both ways, and an argument the script does not declare are `InvalidArgument`: a
-/// binding the query does not mention is refused, never ignored, so a filter you thought
-/// was applied can never silently not be.
+/// What was given is [`given_parameters`]'s; a parameter not given takes its default, and
+/// one with neither stays unbound.
 fn parameter_values(
     inv: &Invocation<'_>,
     name: &str,
     parameters: &[Parameter],
     through: Door,
 ) -> Result<BTreeMap<String, Value>> {
-    let declared = || {
-        if parameters.is_empty() {
+    let declared: Vec<(&str, bool)> = parameters
+        .iter()
+        .map(|p| (p.name.as_str(), p.required && p.default.is_none()))
+        .collect();
+    let mut given = given_parameters(inv, name, &declared, through)?;
+    let mut values = BTreeMap::new();
+    for parameter in parameters {
+        if let Some(lexical) = given
+            .remove(&parameter.name)
+            .or_else(|| parameter.default.clone())
+        {
+            values.insert(parameter.name.clone(), parameter.value(&lexical)?);
+        }
+    }
+    Ok(values)
+}
+
+/// The parameters a run was GIVEN, as text, for a script that declares `declared` (each
+/// parameter's name, and whether a run must give it).
+///
+/// Named arguments, or (through `…:runs`) a JSON object piped as `content`. A missing
+/// parameter a run must give is `MissingArgument`; a parameter given both ways and an
+/// argument the script does not declare are `InvalidArgument`: a binding the script does not
+/// mention is refused, never ignored, so a filter you thought was applied can never silently
+/// not be. Refused here, before a run is recorded: nothing ran.
+fn given_parameters(
+    inv: &Invocation<'_>,
+    name: &str,
+    declared: &[(&str, bool)],
+    through: Door,
+) -> Result<BTreeMap<String, String>> {
+    let listed = || {
+        if declared.is_empty() {
             "it declares none".to_string()
         } else {
             format!(
                 "its parameters are {}",
-                parameters
+                declared
                     .iter()
-                    .map(|p| p.name.as_str())
+                    .map(|(p, _)| *p)
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -1225,11 +1324,11 @@ fn parameter_values(
     for arg in inv.request.args.keys() {
         let known = arg == "as"
             || (through == Door::Runs && arg == "content")
-            || parameters.iter().any(|p| &p.name == arg);
+            || declared.iter().any(|(p, _)| p == arg);
         if !known {
             return Err(Error::InvalidArgument {
                 name: arg.clone(),
-                detail: format!("is not a parameter of urn:script:{name}; {}", declared()),
+                detail: format!("is not a parameter of urn:script:{name}; {}", listed()),
             });
         }
     }
@@ -1241,8 +1340,7 @@ fn parameter_values(
                 .map_err(|e| Error::InvalidArgument {
                     name: "content".to_string(),
                     detail: format!(
-                        "a SPARQL script's piped content is its parameters as one JSON object \
-                         ({e})"
+                        "a script's piped content is its parameters as one JSON object ({e})"
                     ),
                 })?;
             for (key, value) in object {
@@ -1264,27 +1362,25 @@ fn parameter_values(
             }
         }
     }
-    let mut values = BTreeMap::new();
-    for parameter in parameters {
-        let named = optional(inv, &parameter.name)?;
-        let lexical = match (named, piped.remove(&parameter.name)) {
+    let mut given = BTreeMap::new();
+    for (parameter, must) in declared {
+        let named = optional(inv, parameter)?;
+        let lexical = match (named, piped.remove(*parameter)) {
             (Some(_), Some(_)) => {
                 return Err(Error::InvalidArgument {
-                    name: parameter.name.clone(),
+                    name: parameter.to_string(),
                     detail: "is given both by name and in the piped content".to_string(),
                 })
             }
             (Some(value), None) => Some(value.to_string()),
             (None, Some(value)) => Some(value),
-            (None, None) => parameter.default.clone(),
+            (None, None) => None,
         };
         match lexical {
             Some(lexical) => {
-                values.insert(parameter.name.clone(), parameter.value(&lexical)?);
+                given.insert(parameter.to_string(), lexical);
             }
-            None if parameter.required => {
-                return Err(Error::MissingArgument(parameter.name.clone()));
-            }
+            None if *must => return Err(Error::MissingArgument(parameter.to_string())),
             None => {}
         }
     }
@@ -1293,11 +1389,11 @@ fn parameter_values(
             name: "content".to_string(),
             detail: format!(
                 "`{stray}` is not a parameter of urn:script:{name}; {}",
-                declared()
+                listed()
             ),
         });
     }
-    Ok(values)
+    Ok(given)
 }
 
 struct ResultEndpoint {
@@ -1312,7 +1408,8 @@ impl Endpoint for ResultEndpoint {
         }
         let name = name::from_bindings(inv)?;
         let (prepared, keep, ceiling) = prepare_run(inv, &self.shared, &name).await?;
-        let planned = plan(inv, &self.shared, &prepared, keep, &ceiling, Door::Result).await?;
+        let planned =
+            prepare_request(inv, &self.shared, &prepared, keep, &ceiling, Door::Result).await?;
         // ★ The ONLY authority a run gets: the runner's own capability, narrowed. There is
         // no form that widens, so a script cannot reach past its runner whatever it says.
         let answer = inv.issue_attenuated(planned.request, planned.keep).await?;
@@ -1370,7 +1467,7 @@ impl Endpoint for RunsEndpoint {
         let (prepared, keep, ceiling) = prepare_run(inv, shared, &name).await?;
         // A caller's mistake (a missing or ill-typed parameter) is refused here, before a
         // run is recorded: nothing ran.
-        let planned = plan(inv, shared, &prepared, keep, &ceiling, Door::Runs).await?;
+        let planned = prepare_request(inv, shared, &prepared, keep, &ceiling, Door::Runs).await?;
         let runs_as = inv.capability.attenuate(planned.keep.iter().cloned());
         let mut run = Run {
             schema: SCHEMA,
@@ -1443,8 +1540,8 @@ impl Endpoint for RunsEndpoint {
 // A published SPARQL script's own contract, and the space that offers it
 // ---------------------------------------------------------------------------------------
 
-/// A SPARQL script's own endpoints, `…:result` and `…:runs`, each the template's endpoint
-/// behind the script's OWN description.
+/// A SPARQL script's or a plan's own endpoints, `…:result` and `…:runs`, each the
+/// template's endpoint behind the script's OWN description.
 #[derive(Clone)]
 struct PerScript {
     result: Arc<dyn Endpoint>,
@@ -1461,8 +1558,11 @@ struct PerScript {
 ///
 /// ★ **Why a script is its own entry.** A description is the contract the engine routes
 /// arguments by, selection matches on, MCP projects and the Emacs aliases are generated
-/// from, and the kernel answers it per ENDPOINT, never per IRI. A query's parameters are
-/// real arguments only if they are in a description, so each published query gets one.
+/// from, and the kernel answers it per ENDPOINT, never per IRI. A query's or a plan's
+/// parameters are real arguments only if they are in a description, so each gets one. And
+/// the template's `requires` is Lisp's (`urn:cap:lisp`): a query or a plan behind it would be
+/// refused at the floor for a language grant it never needs, so a plan with no parameters
+/// still gets its own.
 /// It is built once per head (the kernel memoizes floors by this allocation) and dropped
 /// by the next publish or retire.
 struct Described {
@@ -1487,18 +1587,19 @@ impl Endpoint for Described {
 }
 
 /// The script resources as a space: [`space`]'s bindings, plus each published SPARQL
-/// script as its own `…:result` and `…:runs` entry, carrying its parameters.
+/// script and plan as its own `…:result` and `…:runs` entry, carrying its parameters.
 pub struct ScriptSpace {
     inner: EndpointSpace,
     shared: Arc<SpaceConfig>,
 }
 
 impl ScriptSpace {
-    /// The script's own endpoints, when it is a SPARQL script this host can run.
+    /// The script's own endpoints, when it is a SPARQL script this host can run or a plan.
+    ///
+    /// A Lisp script has none (the template's contract IS its contract), but finding that
+    /// out costs one head and version read per name, remembered until the next publish.
     fn per_script(&self, name: &str) -> Option<PerScript> {
         let shared = &self.shared;
-        // A host without a SPARQL door has no per-script contracts, and pays nothing here.
-        shared.sparql.as_ref()?;
         if let Some(known) = shared
             .described
             .lock()
@@ -1522,24 +1623,49 @@ impl ScriptSpace {
 
     fn build(&self, name: &str) -> Option<PerScript> {
         let shared = &self.shared;
-        let door = shared.sparql.as_ref()?;
         let head = shared.backend.head(name).ok()??;
         let version = shared.backend.version(name, &head.version).ok()??;
-        if version.language != Language::Sparql {
-            return None;
+        match version.language {
+            Language::Lisp => None,
+            Language::Sparql => self.build_sparql(name, &head, &version),
+            Language::Plan => self.build_plan(name, &head, &version),
         }
+    }
+
+    /// A per-script endpoint: the template's, behind `description`.
+    fn described(
+        &self,
+        inner: Arc<dyn Endpoint>,
+        id: String,
+        description: Description,
+    ) -> Arc<dyn Endpoint> {
+        Arc::new(Described {
+            inner,
+            id,
+            description,
+        }) as Arc<dyn Endpoint>
+    }
+
+    fn result_endpoint(&self) -> Arc<dyn Endpoint> {
+        Arc::new(ResultEndpoint {
+            shared: Arc::clone(&self.shared),
+        })
+    }
+
+    fn runs_endpoint(&self) -> Arc<dyn Endpoint> {
+        Arc::new(RunsEndpoint {
+            shared: Arc::clone(&self.shared),
+        })
+    }
+
+    fn build_sparql(&self, name: &str, head: &Head, version: &Version) -> Option<PerScript> {
+        let door = self.shared.sparql.as_ref()?;
         let analysis = sparql::analyze(&version.source, door).ok()?;
         let about = about(&version.source);
-        // The run gate, as the kernel can check it before the endpoint is entered: the
-        // script's own grant, or for a public one the family (its own grant OR the
-        // public one, which `requires` cannot say any other way: it is all-of).
-        let gate = if head.public {
-            CAP_RUN.to_string()
-        } else {
-            cap_run(name)
-        };
-        let params = |mut spec: ActionSpec| {
-            for p in &analysis.parameters {
+        let inputs: Vec<ArgSpec> = analysis
+            .parameters
+            .iter()
+            .map(|p| {
                 let mut arg = ArgSpec::new(p.name.clone())
                     .summary(
                         p.summary
@@ -1552,14 +1678,10 @@ impl ScriptSpace {
                 } else if !p.required {
                     arg = arg.optional();
                 }
-                spec = spec.input(arg);
-            }
-            spec = spec.requires(gate.clone());
-            for scope in &version.requires {
-                spec = spec.requires(scope.clone());
-            }
-            spec
-        };
+                arg
+            })
+            .collect();
+        let params = |spec: ActionSpec| contracted(spec, &inputs, name, head, version);
         let form = analysis.form;
         let faces = form.faces();
         let as_arg = || {
@@ -1600,36 +1722,21 @@ impl ScriptSpace {
                 ))
                 .verb(Verb::Meta)
         };
-        let result = Arc::new(Described {
-            inner: Arc::new(ResultEndpoint {
-                shared: Arc::clone(shared),
-            }),
-            description,
-            id,
-        }) as Arc<dyn Endpoint>;
+        let result = self.described(self.result_endpoint(), id, description);
         let id = format!("script-{name}-runs");
         let mut spec = params(ActionSpec::new(Verb::Sink))
             .summary(format!(
                 "Run {name} for its effects and record the run; answers the run's IRI."
             ))
-            .input(
-                ArgSpec::new("content")
-                    .summary(
-                        "The parameters as one JSON object, for a pipe (a parameter given \
-                         both here and by name is refused).",
-                    )
-                    .class(XSD_STRING)
-                    .optional(),
-            )
+            .input(piped_parameters_arg())
             .output(PLAIN);
         if form.is_read() {
             spec = spec.input(as_arg());
         }
-        let runs = Arc::new(Described {
-            inner: Arc::new(RunsEndpoint {
-                shared: Arc::clone(shared),
-            }),
-            description: Description::new(id.clone())
+        let runs = self.described(
+            self.runs_endpoint(),
+            id.clone(),
+            Description::new(id)
                 .title(format!("{name}: runs"))
                 .summary(format!(
                     "{about}Each run is recorded: who, which version, under exactly what \
@@ -1637,8 +1744,7 @@ impl ScriptSpace {
                 ))
                 .verb(Verb::Meta)
                 .action(spec),
-            id,
-        }) as Arc<dyn Endpoint>;
+        );
         Some(PerScript {
             result,
             runs,
@@ -1646,6 +1752,137 @@ impl ScriptSpace {
             listed: head.state == State::Published,
         })
     }
+
+    /// A plan's own contract: its declared parameters as arguments, and the capability
+    /// derived from its steps as what the floor checks.
+    fn build_plan(&self, name: &str, head: &Head, version: &Version) -> Option<PerScript> {
+        let analysis = plan::analyze(&version.source).ok()?;
+        let about = about(&version.source);
+        let inputs: Vec<ArgSpec> = analysis
+            .parameters
+            .iter()
+            .map(|p| {
+                let mut arg = ArgSpec::new(p.name.clone())
+                    .summary(
+                        p.summary
+                            .clone()
+                            .unwrap_or_else(|| format!("The plan's parameter `{}`.", p.name)),
+                    )
+                    .class(p.class.clone().unwrap_or_else(|| XSD_STRING.to_string()));
+                if let Some(default) = &p.default {
+                    arg = arg.default_value(default.clone()).optional();
+                } else if !p.required {
+                    arg = arg.optional();
+                }
+                arg
+            })
+            .collect();
+        let params = |spec: ActionSpec| contracted(spec, &inputs, name, head, version);
+        // A plan's answer is its result step's own representation, so no list of faces can
+        // be declared in advance: `as` is passed to the evaluator, which transrepts or
+        // refuses.
+        let as_arg = || {
+            ArgSpec::new("as")
+                .summary(
+                    "The face of the plan's result: when its result step served another \
+                     media type it is transrepted, and refused when nothing converts it.",
+                )
+                .class(XSD_STRING)
+                .optional()
+        };
+        let reads = !analysis.mutates();
+        let id = format!("script-{name}-result");
+        let description = if reads {
+            Description::new(id.clone())
+                .title(format!("{name}: a plan"))
+                .summary(format!(
+                    "{about}Runs as a READ (every step reads) under the runner's capability \
+                     narrowed to what the plan's steps require; as cacheable as its least \
+                     cacheable step, and recomputed after a republish."
+                ))
+                .verb(Verb::Meta)
+                .action(
+                    params(ActionSpec::new(Verb::Source))
+                        .summary(format!("Run the plan {name} and answer its result."))
+                        .input(as_arg())
+                        .output(PLAIN),
+                )
+        } else {
+            // A plan with a Sink or Delete step is never a read: no action is offered here,
+            // and a Source that arrives anyway is refused by the run, naming `…:runs`.
+            Description::new(id.clone())
+                .title(format!("{name}: a plan that writes (run it at …:runs)"))
+                .summary(format!(
+                    "{about}A write: run it with a Sink to urn:script:{name}:runs."
+                ))
+                .verb(Verb::Meta)
+        };
+        let result = self.described(self.result_endpoint(), id, description);
+        let id = format!("script-{name}-runs");
+        let runs = self.described(
+            self.runs_endpoint(),
+            id.clone(),
+            Description::new(id)
+                .title(format!("{name}: runs"))
+                .summary(format!(
+                    "{about}Each run is recorded: who, which version, under exactly what \
+                     capability, when, and the outcome."
+                ))
+                .verb(Verb::Meta)
+                .action(
+                    params(ActionSpec::new(Verb::Sink))
+                        .summary(format!(
+                            "Run the plan {name} and record the run; answers the run's IRI."
+                        ))
+                        .input(piped_parameters_arg())
+                        .input(as_arg())
+                        .output(PLAIN),
+                ),
+        );
+        Some(PerScript {
+            result,
+            runs,
+            reads,
+            listed: head.state == State::Published,
+        })
+    }
+}
+
+/// `spec` with a script's own `inputs`, the run gate and every scope its version requires.
+///
+/// The run gate, as the kernel can check it before the endpoint is entered: the script's own
+/// grant, or for a public one the family (its own grant OR the public one, which `requires`
+/// cannot say any other way: it is all-of).
+fn contracted(
+    mut spec: ActionSpec,
+    inputs: &[ArgSpec],
+    name: &str,
+    head: &Head,
+    version: &Version,
+) -> ActionSpec {
+    for input in inputs {
+        spec = spec.input(input.clone());
+    }
+    spec = spec.requires(if head.public {
+        CAP_RUN.to_string()
+    } else {
+        cap_run(name)
+    });
+    for scope in &version.requires {
+        spec = spec.requires(scope.clone());
+    }
+    spec
+}
+
+/// `…:runs`' piped body, for a script with parameters.
+fn piped_parameters_arg() -> ArgSpec {
+    ArgSpec::new("content")
+        .summary(
+            "The parameters as one JSON object, for a pipe (a parameter given both here and \
+             by name is refused).",
+        )
+        .class(XSD_STRING)
+        .optional()
 }
 
 /// A script's own words for the catalog: its leading comment lines that declare nothing.
@@ -1881,6 +2118,18 @@ impl Endpoint for EvalEndpoint {
                     .to_string(),
             });
         }
+        if language == Language::Plan {
+            // Not a second door onto the same thing: the host's evaluator already runs a
+            // supplied plan under the caller's own capability, which is all this door adds.
+            return Err(Error::InvalidArgument {
+                name: "language".to_string(),
+                detail: format!(
+                    "a plan supplied ad hoc runs at {} (`in` = the plan), under the caller's \
+                     own capability; to keep it, publish it as a script",
+                    plan::EVAL
+                ),
+            });
+        }
         if let Some(save) = optional(inv, "save")? {
             let save = save.trim();
             name::validate(save)?;
@@ -1929,7 +2178,7 @@ impl Endpoint for EvalEndpoint {
                         ArgSpec::new("language")
                             .summary(
                                 "The code's language: `lisp` (SPARQL here is the Protocol \
-                                 face, not in this version).",
+                                 face, not in this version; a plan runs at urn:plan:eval).",
                             )
                             .class(XSD_STRING)
                             .one_of(Language::ALL.map(Language::as_str))
