@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use common::*;
 use ikigai_core::{Capability, Error, Verb};
-use ikigai_script::authority::{same_for_all, Ceiling, PrincipalStamper};
+use ikigai_script::authority::{same_for_all, Ceiling};
 use ikigai_script::model::when;
 use ikigai_script::MemoryBackend;
 use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
@@ -75,21 +75,41 @@ fn no_blank_nodes(triples: &[Triple], text: &str) {
     assert!(blanks.is_empty(), "blank nodes {blanks:?} in\n{text}");
 }
 
-/// A host whose principal is a person, so the run face has an agent to name.
+const BRIAN: &str = "urn:test:person:brian";
+
+/// A host whose runs are a person's, so the run face has an agent to name: every run in
+/// these tests is made under [`as_brian`].
 fn stamped_host() -> Host {
-    let stamper: PrincipalStamper = Arc::new(|_| "urn:test:person:brian".to_string());
     host_with(
         Arc::new(MemoryBackend::new()),
         same_for_all(Ceiling::unbounded()),
-        Some(stamper),
     )
+}
+
+/// A runner of `name` whose door minted [`BRIAN`].
+fn as_brian(name: &str) -> Capability {
+    cap(&[&format!("urn:cap:script:run:{name}"), "urn:cap:lisp"])
+        .with_principal(BRIAN)
+        .unwrap()
+}
+
+/// Run `name` for its effects as [`BRIAN`]: the run's IRI.
+fn run_as_brian(host: &Host, name: &str) -> String {
+    call(
+        &host.kernel,
+        &as_brian(name),
+        Verb::Sink,
+        &format!("urn:script:{name}:runs"),
+        &[],
+    )
+    .unwrap()
 }
 
 #[test]
 fn the_catalog_and_a_run_answer_a_turtle_face() {
     let host = stamped_host();
     publish(&host.kernel, "a", "(+ 1 2)", &[]);
-    let run = ok(&host.kernel, Verb::Sink, "urn:script:a:runs", &[]);
+    let run = run_as_brian(&host, "a");
     for iri in [run.trim(), "urn:script:catalog"] {
         let answer = ok(&host.kernel, Verb::Source, iri, &[("as", TURTLE)]);
         no_blank_nodes(&parse(&answer), &answer);
@@ -101,10 +121,10 @@ fn a_run_records_turtle_and_json_faces_are_term_equal() {
     let host = stamped_host();
     publish(&host.kernel, "ok", "(+ 1 2)", &[]);
     publish(&host.kernel, "bad", "(car 1)", &[]);
-    let fine = ok(&host.kernel, Verb::Sink, "urn:script:ok:runs", &[]);
+    let fine = run_as_brian(&host, "ok");
     let failed = match call(
         &host.kernel,
-        &Capability::root(),
+        &as_brian("bad"),
         Verb::Sink,
         "urn:script:bad:runs",
         &[],
@@ -132,6 +152,7 @@ fn a_run_records_turtle_and_json_faces_are_term_equal() {
         ))
         .unwrap();
         assert_eq!(json["outcome"]["status"], status, "{json}");
+        assert_eq!(json["principal"], BRIAN, "{json}");
         let name = json["name"].as_str().unwrap();
         let version = format!(
             "urn:script:{name}:version:{}",
@@ -184,7 +205,7 @@ fn the_catalogs_turtle_and_json_faces_are_term_equal() {
     publish(&host.kernel, "a", "(+ 1 2)", &[]);
     publish(&host.kernel, "b", "2", &[("public", "true")]);
     publish(&host.kernel, "c", "3", &[]);
-    ok(&host.kernel, Verb::Sink, "urn:script:a:runs", &[]);
+    run_as_brian(&host, "a");
     let turtle = ok(
         &host.kernel,
         Verb::Source,
@@ -266,15 +287,19 @@ fn the_catalogs_turtle_and_json_faces_are_term_equal() {
 #[test]
 fn an_awkward_principal_or_result_cannot_break_the_graph() {
     // A principal that is not an IRI names no agent (the JSON face still carries it), and a
-    // result with quotes and line breaks never reaches the graph at all.
-    let stamper: PrincipalStamper = Arc::new(|_| "not an iri \"<x>\"".to_string());
+    // result with quotes and line breaks never reaches the graph at all. A door can no longer
+    // mint such a principal (`with_principal` refuses anything but an absolute IRI), but a
+    // record written by a 0.1.0 host's stamper can carry one, so the record is rewritten in
+    // the backend here, as that host would have left it.
     let host = host_with(
         Arc::new(MemoryBackend::new()),
         same_for_all(Ceiling::unbounded()),
-        Some(stamper),
     );
     publish(&host.kernel, "w", "\"say \\\"hi\\\"\\n\\tthen > go\"", &[]);
     let run = ok(&host.kernel, Verb::Sink, "urn:script:w:runs", &[]);
+    let mut record = host.backend.run("w", 1).unwrap().expect("run 1");
+    record.principal = "not an iri \"<x>\"".to_string();
+    host.backend.finish_run("w", &record).unwrap();
     let turtle = ok(&host.kernel, Verb::Source, run.trim(), &[("as", TURTLE)]);
     let triples = parse(&turtle);
     assert!(
@@ -282,6 +307,13 @@ fn an_awkward_principal_or_result_cannot_break_the_graph() {
         "{turtle}"
     );
     assert_eq!(objects(&triples, run.trim(), &ik("outcome")).len(), 1);
+    let json = ok(
+        &host.kernel,
+        Verb::Source,
+        run.trim(),
+        &[("as", "application/json")],
+    );
+    assert!(json.contains("not an iri"), "{json}");
 }
 
 #[test]

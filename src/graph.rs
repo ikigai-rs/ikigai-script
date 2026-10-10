@@ -10,7 +10,7 @@
 //! <urn:script:{name}:version:{digest}>  prov:specializationOf  <urn:script:{name}>
 //! <urn:script:{name}:run:{id}>  a prov:Activity ;
 //!     prov:used <urn:script:{name}:version:{digest}> ;                 the version that ran
-//!     prov:wasAssociatedWith <principal> ;                            who, as the host stamped
+//!     prov:wasAssociatedWith <principal> ;                            who, as the door minted it
 //!     prov:startedAtTime "…"^^xsd:dateTime ; prov:endedAtTime "…"^^xsd:dateTime ;
 //!     ik:outcome <urn:script:outcome:ok> | <urn:script:outcome:failed>   absent while running
 //! ```

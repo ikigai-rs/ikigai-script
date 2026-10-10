@@ -90,7 +90,8 @@ impl Language {
 #[serde(rename_all = "lowercase")]
 pub enum State {
     /// Saved, not runnable, and PRIVATE until published: a version that was never published
-    /// is visible only to its author (the principal the host stamped when they wrote it)
+    /// is visible only to its author (the principal their capability named when they wrote
+    /// it)
     /// and to root. To every other holder of the script's read or run grant it is absent.
     Draft,
     /// Runnable.
@@ -219,7 +220,7 @@ pub struct Event {
     pub state: State,
     /// Whether it was public afterwards.
     pub public: bool,
-    /// Who, as the host stamped it.
+    /// Who: the principal the writer's capability named ([`crate::authority::principal_of`]).
     pub principal: String,
     /// When, in milliseconds since the epoch, from the kernel's clock (`None` on a
     /// clockless kernel).
@@ -285,7 +286,8 @@ pub struct Run {
     pub id: u64,
     /// The version that ran.
     pub version: String,
-    /// Who ran it, as the host stamped it — never caller-supplied.
+    /// Who ran it: the principal the runner's capability named
+    /// ([`crate::authority::principal_of`]), never caller-supplied.
     pub principal: String,
     /// The capability the run executed under, exactly: grants and exclusions.
     pub capability: BTreeSet<String>,

@@ -532,7 +532,7 @@ fn the_host_ceiling_bounds_the_graphs_a_query_may_read() {
         "stale" => Ceiling::nothing(),
         _ => Ceiling::unbounded(),
     });
-    let host = sparql_host_with(SparqlDoor::store(), ceiling, None);
+    let host = sparql_host_with(SparqlDoor::store(), ceiling);
     seed(&host.kernel, DATA);
     sparql(&host.kernel, "stale", STALE);
     let message = denied(result(&host, &Capability::root(), "stale", &[]));

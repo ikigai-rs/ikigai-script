@@ -75,7 +75,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use ikigai_core::{is_deny_scope, Capability, Error, Invocation, Result};
+use ikigai_core::{is_deny_scope, Capability, Error, Result};
 
 /// Reading a script, as declared: "holds some script read grant". A held grant names one
 /// script — [`cap_read`] — and the exact one is checked inside.
@@ -124,50 +124,49 @@ pub fn cap_run(name: &str) -> String {
     format!("urn:cap:script:run:{name}")
 }
 
-/// Who a request comes from, as the HOST says — never an argument the caller sends.
-///
-/// The library records it on every publish and every run. It has no way to know who is
-/// on the other end of a door, so the host hands [`crate::SpaceConfig::principal`] a
-/// function of the invocation, which can read what the host's own door stamped (an
-/// authenticated identity, the capability) and nothing the caller chose. The ledger's
-/// `ClaimKindStamper` is the same shape for the same reason.
-///
-/// ```
-/// use ikigai_script::authority::{PrincipalStamper, ANONYMOUS};
-/// use std::sync::Arc;
-/// // A host whose door holds back anonymous callers to `urn:cap:script:run:public`:
-/// let stamper: PrincipalStamper = Arc::new(|inv| {
-///     if inv.capability.allows("urn:cap:host:signed-in") {
-///         "urn:example:person:brian".to_string()
-///     } else {
-///         ANONYMOUS.to_string()
-///     }
-/// });
-/// # let _ = stamper;
-/// ```
-pub type PrincipalStamper = Arc<dyn Fn(&Invocation<'_>) -> String + Send + Sync>;
-
-/// What the default stamper records: the host did not say who.
+/// What is recorded as the principal when the request's capability names none: root (the
+/// host's own authority, which holds every principal and names none), a door that minted no
+/// `urn:cap:principal:` scope, or a capability carrying several (which names nobody). Honest
+/// rather than useful, so a host that never identifies its callers cannot have its records
+/// claim an identity nobody checked. The value records written before 0.2.0 carry for a host
+/// that stamped nothing, kept so old and new records agree.
 pub const UNSTAMPED: &str = "urn:script:principal:unstamped";
 
-/// What a host's stamper conventionally records for an unauthenticated caller.
+/// What a door conventionally mints (`Capability::with_principal`) for a caller it cannot
+/// identify. Many callers share it, so it is nobody's identity: see [`is_identity`].
 pub const ANONYMOUS: &str = "urn:script:principal:anonymous";
 
-/// The default stamper: every request is [`UNSTAMPED`]. Honest rather than useful, so a
-/// host that never decides cannot have its run records claim an identity nobody checked.
-pub fn unstamped() -> PrincipalStamper {
-    Arc::new(|_| UNSTAMPED.to_string())
+/// Who a request comes from: the principal its CAPABILITY names, minted by the host's door
+/// (`urn:cap:principal:<iri>`, ikigai-core 0.1.93), or [`UNSTAMPED`] when it names none.
+///
+/// The library records it on every publish and every run. It is never an argument: a caller
+/// cannot name itself, and narrowing a capability can never add or change a principal, so a
+/// sub-request issued on someone's behalf carries their name or none.
+///
+/// ```
+/// use ikigai_core::Capability;
+/// use ikigai_script::authority::{principal_of, UNSTAMPED};
+///
+/// let door = Capability::scoped(["urn:cap:script:run:job"]);
+/// let alice = door.with_principal("urn:example:person:alice").unwrap();
+/// assert_eq!(principal_of(&alice), "urn:example:person:alice");
+/// assert_eq!(principal_of(&door), UNSTAMPED);
+/// // Root is the host's own authority, not a party's.
+/// assert_eq!(principal_of(&Capability::root()), UNSTAMPED);
+/// ```
+pub fn principal_of(capability: &Capability) -> String {
+    capability.principal().unwrap_or(UNSTAMPED).to_string()
 }
 
-/// Whether a stamped principal names SOMEONE: anything but [`UNSTAMPED`] and
-/// [`ANONYMOUS`], which a stamper answers for many different callers at once.
+/// Whether a recorded principal names SOMEONE: anything but [`UNSTAMPED`] and
+/// [`ANONYMOUS`], which stand for many different callers at once.
 ///
 /// It decides who may see a draft. A draft is visible only to its author until it is
-/// published, and the author is the principal the stamper recorded when the draft was
-/// written; two callers stamped [`ANONYMOUS`] are not one person, and a host that stamps
-/// nothing cannot tell any two callers apart. So a draft written under either is nobody's:
-/// only root sees it until it is published. A host whose door cannot identify a caller
-/// stamps [`ANONYMOUS`] rather than inventing a shared name.
+/// published, and the author is the principal recorded when the draft was written; two
+/// callers minted [`ANONYMOUS`] are not one person, and a capability naming no principal
+/// cannot be told apart from any other. So a draft written under either is nobody's: only
+/// root sees it until it is published. A door that cannot identify a caller mints
+/// [`ANONYMOUS`] (or nothing) rather than inventing a shared name.
 ///
 /// ```
 /// use ikigai_script::authority::{is_identity, ANONYMOUS, UNSTAMPED};

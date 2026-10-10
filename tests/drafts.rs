@@ -3,49 +3,43 @@
 //! told so exactly as a name nobody wrote is, so a draft's existence leaks no more than its
 //! text does.
 //!
-//! The author is the principal the HOST stamps (`SpaceConfig::principal`), the same value a
-//! publish records as the script's publisher. These tests stamp it from a door that knows
-//! who is calling independently of the capability, as a host's authenticated door does, so
-//! two people holding the SAME capability are two principals: the case where a cached
-//! answer could be served to the wrong one.
+//! The author is the principal the writer's CAPABILITY names (ledger #1077): the host's door
+//! mints `urn:cap:principal:<iri>` with `Capability::with_principal`, and these tests mint it
+//! the same way. Alice and Bob hold the SAME grants and differ only in the principal minted
+//! into them, which is the case where a cached answer could be served to the wrong one, and
+//! the reason the cache keys on the whole capability.
 
 mod common;
 
-use std::sync::{Arc, Mutex};
-
 use common::*;
 use ikigai_core::{Capability, Error, Kernel, Verb};
-use ikigai_script::authority::{same_for_all, Ceiling, PrincipalStamper, ANONYMOUS};
+use ikigai_script::authority::{same_for_all, Ceiling, ANONYMOUS};
 use ikigai_script::{Catalog, MemoryBackend};
 
-/// Who the door says is calling, set by each test before each call.
-#[derive(Clone, Default)]
-struct Door(Arc<Mutex<String>>);
+/// `capability` as the door hands it to `who`.
+fn minted(who: &str, capability: &Capability) -> Capability {
+    capability
+        .with_principal(who)
+        .expect("a principal a door can mint")
+}
 
-impl Door {
-    fn stamper(&self) -> PrincipalStamper {
-        let who = Arc::clone(&self.0);
-        Arc::new(move |_inv| who.lock().unwrap().clone())
-    }
-
-    fn call(
-        &self,
-        kernel: &Kernel,
-        who: &str,
-        capability: &Capability,
-        verb: Verb,
-        iri: &str,
-        args: &[(&str, &str)],
-    ) -> std::result::Result<String, Error> {
-        *self.0.lock().unwrap() = who.to_string();
-        call(kernel, capability, verb, iri, args)
-    }
+/// Resolve as `who`: under `capability` with `who` minted into it.
+fn call_as(
+    kernel: &Kernel,
+    who: &str,
+    capability: &Capability,
+    verb: Verb,
+    iri: &str,
+    args: &[(&str, &str)],
+) -> std::result::Result<String, Error> {
+    call(kernel, &minted(who, capability), verb, iri, args)
 }
 
 const ALICE: &str = "urn:test:person:alice";
 const BOB: &str = "urn:test:person:bob";
 
-/// What both people hold: the SAME capability, so only the door tells them apart.
+/// What both people hold: the SAME grants, so only the principal their door minted tells
+/// them apart.
 fn editor(name: &str) -> Capability {
     cap(&[
         &format!("urn:cap:script:write:{name}"),
@@ -55,14 +49,11 @@ fn editor(name: &str) -> Capability {
     ])
 }
 
-fn stamped() -> (Host, Door) {
-    let door = Door::default();
-    let host = host_with(
-        Arc::new(MemoryBackend::new()),
+fn stamped() -> Host {
+    host_with(
+        std::sync::Arc::new(MemoryBackend::new()),
         same_for_all(Ceiling::unbounded()),
-        Some(door.stamper()),
-    );
-    (host, door)
+    )
 }
 
 fn not_found(result: std::result::Result<String, Error>) -> String {
@@ -74,10 +65,10 @@ fn not_found(result: std::result::Result<String, Error>) -> String {
 
 #[test]
 fn a_draft_is_visible_to_its_author_and_absent_to_every_other_reader() {
-    let (host, door) = stamped();
+    let host = stamped();
     let k = &host.kernel;
     let who = editor("plan");
-    door.call(
+    call_as(
         k,
         ALICE,
         &who,
@@ -89,15 +80,15 @@ fn a_draft_is_visible_to_its_author_and_absent_to_every_other_reader() {
 
     // The author reads it, twice (a cached answer, if there were one, would be hers).
     for _ in 0..2 {
-        let source = door.call(k, ALICE, &who, Verb::Source, "urn:script:plan", &[]);
+        let source = call_as(k, ALICE, &who, Verb::Source, "urn:script:plan", &[]);
         assert_eq!(source.unwrap(), "(+ 1 2)");
-        let exists = door.call(k, ALICE, &who, Verb::Exists, "urn:script:plan", &[]);
+        let exists = call_as(k, ALICE, &who, Verb::Exists, "urn:script:plan", &[]);
         assert_eq!(exists.unwrap(), "true\n");
     }
     // Bob holds the same capability and learns nothing, not even that it exists: exactly
     // what he is told about a name nobody wrote.
-    let hidden = not_found(door.call(k, BOB, &who, Verb::Source, "urn:script:plan", &[]));
-    let absent = not_found(door.call(
+    let hidden = not_found(call_as(k, BOB, &who, Verb::Source, "urn:script:plan", &[]));
+    let absent = not_found(call_as(
         k,
         BOB,
         &editor("nothing"),
@@ -107,9 +98,9 @@ fn a_draft_is_visible_to_its_author_and_absent_to_every_other_reader() {
     ));
     assert_eq!(hidden, absent.replace("nothing", "plan"));
     for _ in 0..2 {
-        let exists = door.call(k, BOB, &who, Verb::Exists, "urn:script:plan", &[]);
+        let exists = call_as(k, BOB, &who, Verb::Exists, "urn:script:plan", &[]);
         assert_eq!(exists.unwrap(), "false\n");
-        let json = door.call(
+        let json = call_as(
             k,
             BOB,
             &who,
@@ -120,11 +111,11 @@ fn a_draft_is_visible_to_its_author_and_absent_to_every_other_reader() {
         not_found(json);
     }
     // And the author still sees it after Bob asked (no cached "absent" served to her).
-    let exists = door.call(k, ALICE, &who, Verb::Exists, "urn:script:plan", &[]);
+    let exists = call_as(k, ALICE, &who, Verb::Exists, "urn:script:plan", &[]);
     assert_eq!(exists.unwrap(), "true\n");
 
     // Published, it is every reader's.
-    door.call(
+    call_as(
         k,
         ALICE,
         &who,
@@ -133,39 +124,44 @@ fn a_draft_is_visible_to_its_author_and_absent_to_every_other_reader() {
         &[("content", "(+ 1 2)")],
     )
     .unwrap();
-    let source = door.call(k, BOB, &who, Verb::Source, "urn:script:plan", &[]);
+    let source = call_as(k, BOB, &who, Verb::Source, "urn:script:plan", &[]);
     assert_eq!(source.unwrap(), "(+ 1 2)");
 }
 
 #[test]
 fn a_version_never_published_stays_its_authors_after_the_head_moves_on() {
-    let (host, door) = stamped();
+    let host = stamped();
     let k = &host.kernel;
     let who = editor("notes");
-    let published = door
-        .call(
-            k,
-            ALICE,
-            &who,
-            Verb::Sink,
-            "urn:script:notes",
-            &[("content", "1")],
-        )
-        .unwrap();
-    let draft = door
-        .call(
-            k,
-            BOB,
-            &who,
-            Verb::Sink,
-            "urn:script:notes",
-            &[("content", "2"), ("state", "draft")],
-        )
-        .unwrap();
+    let published = call_as(
+        k,
+        ALICE,
+        &who,
+        Verb::Sink,
+        "urn:script:notes",
+        &[("content", "1")],
+    )
+    .unwrap();
+    let draft = call_as(
+        k,
+        BOB,
+        &who,
+        Verb::Sink,
+        "urn:script:notes",
+        &[("content", "2"), ("state", "draft")],
+    )
+    .unwrap();
     // While the head is Bob's draft, Alice (who published the version before it) is not
     // its author.
-    not_found(door.call(k, ALICE, &who, Verb::Source, "urn:script:notes", &[]));
-    door.call(
+    not_found(call_as(
+        k,
+        ALICE,
+        &who,
+        Verb::Source,
+        "urn:script:notes",
+        &[],
+    ));
+    call_as(
         k,
         ALICE,
         &who,
@@ -179,27 +175,27 @@ fn a_version_never_published_stays_its_authors_after_the_head_moves_on() {
     // The published version stays every reader's; the draft that was never published stays
     // Bob's, though the head has moved past it and its digest is in the history.
     for reader in [ALICE, BOB] {
-        let v = door.call(k, reader, &who, Verb::Source, published, &[]);
+        let v = call_as(k, reader, &who, Verb::Source, published, &[]);
         assert_eq!(v.unwrap(), "1");
     }
     assert_eq!(
-        door.call(k, BOB, &who, Verb::Source, draft, &[]).unwrap(),
+        call_as(k, BOB, &who, Verb::Source, draft, &[]).unwrap(),
         "2"
     );
     assert_eq!(
-        door.call(k, BOB, &who, Verb::Exists, draft, &[]).unwrap(),
+        call_as(k, BOB, &who, Verb::Exists, draft, &[]).unwrap(),
         "true\n"
     );
-    not_found(door.call(k, ALICE, &who, Verb::Source, draft, &[]));
+    not_found(call_as(k, ALICE, &who, Verb::Source, draft, &[]));
     assert_eq!(
-        door.call(k, ALICE, &who, Verb::Exists, draft, &[]).unwrap(),
+        call_as(k, ALICE, &who, Verb::Exists, draft, &[]).unwrap(),
         "false\n"
     );
 }
 
 #[test]
 fn retiring_a_draft_does_not_publish_it() {
-    let (host, door) = stamped();
+    let host = stamped();
     let k = &host.kernel;
     let who = cap(&[
         "urn:cap:script:write:wip",
@@ -207,7 +203,7 @@ fn retiring_a_draft_does_not_publish_it() {
         "urn:cap:script:delete:wip",
         "urn:cap:lisp",
     ]);
-    door.call(
+    call_as(
         k,
         ALICE,
         &who,
@@ -216,28 +212,26 @@ fn retiring_a_draft_does_not_publish_it() {
         &[("content", "(+ 1 1)"), ("state", "draft")],
     )
     .unwrap();
-    door.call(k, BOB, &who, Verb::Delete, "urn:script:wip", &[])
-        .unwrap();
-    not_found(door.call(k, BOB, &who, Verb::Source, "urn:script:wip", &[]));
-    let record = door
-        .call(
-            k,
-            ALICE,
-            &who,
-            Verb::Source,
-            "urn:script:wip",
-            &[("as", "application/json")],
-        )
-        .unwrap();
+    call_as(k, BOB, &who, Verb::Delete, "urn:script:wip", &[]).unwrap();
+    not_found(call_as(k, BOB, &who, Verb::Source, "urn:script:wip", &[]));
+    let record = call_as(
+        k,
+        ALICE,
+        &who,
+        Verb::Source,
+        "urn:script:wip",
+        &[("as", "application/json")],
+    )
+    .unwrap();
     assert!(record.contains("\"retired\""), "{record}");
 }
 
 #[test]
 fn a_runner_who_is_not_the_author_cannot_read_a_drafts_compiled_form() {
-    let (host, door) = stamped();
+    let host = stamped();
     let k = &host.kernel;
     let who = editor("job");
-    door.call(
+    call_as(
         k,
         ALICE,
         &who,
@@ -248,7 +242,7 @@ fn a_runner_who_is_not_the_author_cannot_read_a_drafts_compiled_form() {
     .unwrap();
     let runner = cap(&["urn:cap:script:run:job", "urn:cap:lisp"]);
     // The compiled form carries the program: absent to Bob, the author's to Alice.
-    not_found(door.call(
+    not_found(call_as(
         k,
         BOB,
         &runner,
@@ -256,7 +250,7 @@ fn a_runner_who_is_not_the_author_cannot_read_a_drafts_compiled_form() {
         "urn:script:job:compiled",
         &[],
     ));
-    door.call(
+    call_as(
         k,
         ALICE,
         &runner,
@@ -266,9 +260,23 @@ fn a_runner_who_is_not_the_author_cannot_read_a_drafts_compiled_form() {
     )
     .unwrap();
     // So a run is absent to Bob, and refused for its state to Alice; nothing evaluates.
-    not_found(door.call(k, BOB, &runner, Verb::Source, "urn:script:job:result", &[]));
-    not_found(door.call(k, BOB, &runner, Verb::Sink, "urn:script:job:runs", &[]));
-    match door.call(
+    not_found(call_as(
+        k,
+        BOB,
+        &runner,
+        Verb::Source,
+        "urn:script:job:result",
+        &[],
+    ));
+    not_found(call_as(
+        k,
+        BOB,
+        &runner,
+        Verb::Sink,
+        "urn:script:job:runs",
+        &[],
+    ));
+    match call_as(
         k,
         ALICE,
         &runner,
@@ -284,7 +292,7 @@ fn a_runner_who_is_not_the_author_cannot_read_a_drafts_compiled_form() {
 
 #[test]
 fn the_catalog_lists_a_draft_to_its_author_alone() {
-    let (host, door) = stamped();
+    let host = stamped();
     let k = &host.kernel;
     let both = cap(&[
         "urn:cap:script:write:a",
@@ -293,7 +301,7 @@ fn the_catalog_lists_a_draft_to_its_author_alone() {
         "urn:cap:script:read:b",
         "urn:cap:lisp",
     ]);
-    door.call(
+    call_as(
         k,
         ALICE,
         &both,
@@ -302,7 +310,7 @@ fn the_catalog_lists_a_draft_to_its_author_alone() {
         &[("content", "1")],
     )
     .unwrap();
-    door.call(
+    call_as(
         k,
         ALICE,
         &both,
@@ -312,16 +320,15 @@ fn the_catalog_lists_a_draft_to_its_author_alone() {
     )
     .unwrap();
     let names = |who: &str| -> Vec<String> {
-        let text = door
-            .call(
-                k,
-                who,
-                &both,
-                Verb::Source,
-                "urn:script:catalog",
-                &[("as", "application/json")],
-            )
-            .unwrap();
+        let text = call_as(
+            k,
+            who,
+            &both,
+            Verb::Source,
+            "urn:script:catalog",
+            &[("as", "application/json")],
+        )
+        .unwrap();
         let catalog: Catalog = serde_json::from_str(&text).unwrap();
         catalog.scripts.into_iter().map(|e| e.name).collect()
     };
@@ -331,8 +338,9 @@ fn the_catalog_lists_a_draft_to_its_author_alone() {
 
 #[test]
 fn an_unstamped_or_anonymous_principal_is_nobodys_author() {
-    // A host that stamps nothing cannot tell its callers apart, so no caller can be shown to
-    // be a draft's author: the draft is root's alone, and the refusal says why.
+    // A capability that names no principal cannot be told apart from any other, so no
+    // caller holding one can be shown to be a draft's author: the draft is root's alone, and
+    // the refusal says why.
     let host = host();
     let k = &host.kernel;
     let who = editor("x");
@@ -345,13 +353,13 @@ fn an_unstamped_or_anonymous_principal_is_nobodys_author() {
     )
     .unwrap();
     let message = not_found(call(k, &who, Verb::Source, "urn:script:x", &[]));
-    assert!(message.contains("stamps no principal"), "{message}");
+    assert!(message.contains("names no principal"), "{message}");
     assert_eq!(ok(k, Verb::Source, "urn:script:x", &[]), "1");
 
     // Two anonymous callers are not one person.
-    let (host, door) = stamped();
+    let host = stamped();
     let k = &host.kernel;
-    door.call(
+    call_as(
         k,
         ANONYMOUS,
         &who,
@@ -360,7 +368,14 @@ fn an_unstamped_or_anonymous_principal_is_nobodys_author() {
         &[("content", "1"), ("state", "draft")],
     )
     .unwrap();
-    not_found(door.call(k, ANONYMOUS, &who, Verb::Source, "urn:script:x", &[]));
+    not_found(call_as(
+        k,
+        ANONYMOUS,
+        &who,
+        Verb::Source,
+        "urn:script:x",
+        &[],
+    ));
 }
 
 #[test]
@@ -368,19 +383,19 @@ fn a_private_drafts_contract_says_nothing_its_text_does() {
     // Meta is answered from the description, to anyone who can reach the door, so a
     // SPARQL draft's own contract (its parameters, its comment) would publish its text. A
     // draft never published wears the template's contract instead.
-    let door = Door::default();
     let host = sparql_host_with(
         ikigai_script::sparql::SparqlDoor::store(),
         same_for_all(Ceiling::unbounded()),
-        Some(door.stamper()),
     );
     let k = &host.kernel;
+    // Root names no principal, so the author holds what the query needs and no more.
+    let author = cap(&["urn:cap:script:write:q", "urn:cap:store:read:graph:urn:g:a"]);
     let query = "# The secret plan.\n# @param who xsd:string\n\
                  SELECT ?s FROM <urn:g:a> WHERE { ?s ?p ?who }";
-    door.call(
+    call_as(
         k,
         ALICE,
-        &Capability::root(),
+        &author,
         Verb::Sink,
         "urn:script:q",
         &[
@@ -405,10 +420,10 @@ fn a_private_drafts_contract_says_nothing_its_text_does() {
     assert!(!contract.contains("\"who\""), "{contract}");
     assert_eq!(contract, meta_of_nothing(k));
     // Published, the query is its own entry again.
-    door.call(
+    call_as(
         k,
         ALICE,
-        &Capability::root(),
+        &author,
         Verb::Sink,
         "urn:script:q",
         &[("content", query), ("language", "sparql")],
@@ -426,4 +441,81 @@ fn meta_of_nothing(k: &Kernel) -> String {
         &[],
     )
     .unwrap()
+}
+
+/// ★ Ledger #1077: the author's answers are CACHED now, and the cache is partitioned by the
+/// principal the capability carries, so alice's cached draft is never served to bob though
+/// the rest of their capabilities are identical, and bob's cached "absent" is never served
+/// to alice. Before 0.2.0 the principal came from a stamper the cache key could not see, so
+/// neither could be cached at all.
+#[test]
+fn alices_cached_draft_is_never_bobs_answer() {
+    let host = stamped();
+    let k = &host.kernel;
+    let grants = editor("plan");
+    let (alice, bob) = (minted(ALICE, &grants), minted(BOB, &grants));
+    let draft = call(
+        k,
+        &alice,
+        Verb::Sink,
+        "urn:script:plan",
+        &[("content", "(+ 1 2)"), ("state", "draft")],
+    )
+    .unwrap();
+    let draft = draft.trim().to_string();
+    let compiled = "urn:script:plan:compiled".to_string();
+    let reads: Vec<(Verb, String)> = vec![
+        (Verb::Source, "urn:script:plan".to_string()),
+        (Verb::Exists, "urn:script:plan".to_string()),
+        (Verb::Source, draft.clone()),
+        (Verb::Exists, draft.clone()),
+        (Verb::Source, compiled),
+    ];
+    for (verb, iri) in &reads {
+        let cached = |who: &Capability| k.is_cached(&request(*verb, iri, &[]), who);
+        let first = call(k, &alice, *verb, iri, &[]).unwrap();
+        assert!(
+            cached(&alice),
+            "{verb:?} {iri}: the author's answer is cached"
+        );
+        assert!(
+            !cached(&bob),
+            "{verb:?} {iri}: and only under her capability"
+        );
+        // Bob asks after her answer is cached, and is told what a reader of nothing is.
+        match call(k, &bob, *verb, iri, &[]) {
+            Ok(answer) => assert_eq!(answer, "false\n", "{verb:?} {iri}: served {answer:?}"),
+            Err(error) => assert!(
+                matches!(error, Error::NotFound(_)),
+                "{verb:?} {iri}: {error}"
+            ),
+        }
+        // And her answer is still hers, from the cache, after bob's.
+        assert!(cached(&alice), "{verb:?} {iri}");
+        assert_eq!(
+            call(k, &alice, *verb, iri, &[]).unwrap(),
+            first,
+            "{verb:?} {iri}"
+        );
+    }
+    // Published, both see it, and the publish cut every cached answer above.
+    call(
+        k,
+        &alice,
+        Verb::Sink,
+        "urn:script:plan",
+        &[("content", "(+ 1 2)")],
+    )
+    .unwrap();
+    for (verb, iri) in &reads {
+        assert!(
+            !k.is_cached(&request(*verb, iri, &[]), &alice),
+            "{verb:?} {iri}"
+        );
+    }
+    assert_eq!(call(k, &bob, Verb::Source, &draft, &[]).unwrap(), "(+ 1 2)");
+    assert_eq!(
+        call(k, &bob, Verb::Exists, "urn:script:plan", &[]).unwrap(),
+        "true\n"
+    );
 }

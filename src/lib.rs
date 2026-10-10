@@ -23,8 +23,10 @@
 //!   files under a directory the host chooses);
 //! - **the ceiling** each script may run under ([`authority::CeilingPolicy`], from the
 //!   host's `<config home>/script-authority/{name}`);
-//! - **who a request comes from** ([`authority::PrincipalStamper`]), recorded on every
-//!   publish and run and never taken from the caller.
+//! - **who a request comes from**: the principal its door mints into the request's
+//!   capability (`Capability::with_principal`, `urn:cap:principal:<iri>`), read back with
+//!   [`authority::principal_of`], recorded on every publish and run and never taken from
+//!   the caller.
 //!
 //! ```
 //! use ikigai_core::{Capability, Fallback, Kernel, Space};

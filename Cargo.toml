@@ -37,11 +37,16 @@ categories = ["development-tools"]
 # still compiles against 0.1.86, but the conformance dev-dependency needs 0.1.89
 # (`space_iri`, `SPACE_PREFIX`), so no test of this crate can run on anything older, and a
 # floor nothing tests is not a floor this crate can vouch for.
-# ⚠ `"0.1.89"` is a RANGE, `>=0.1.89, <0.2.0`: when core reaches 0.2 this line must move
+# **0.1.93 since ledger #1077 and #1079**, an API floor again: who a request is for is read
+# from the capability (`Capability::principal`, `acts_as`, the `urn:cap:principal:` scope a
+# door mints with `with_principal`), which replaced this crate's own principal stamper, and a
+# version's NotFound hangs from its script's thread through `Invocation::depends_on`, which
+# 0.1.93 is the first to carry on a failure. Both arrived in 0.1.93.
+# ⚠ `"0.1.93"` is a RANGE, `>=0.1.93, <0.2.0`: when core reaches 0.2 this line must move
 # or the crate freezes out of it.
-ikigai-core = "0.1.89"
-# `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the backend, the
-# host's ceiling and principal stamper), so they are `Endpoint` impls, not closures.
+ikigai-core = "0.1.93"
+# `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the backend and the
+# host's ceiling), so they are `Endpoint` impls, not closures.
 async-trait = "0.1"
 # Every record this crate keeps (a head, a version, a run) and its machine face are JSON:
 # one serializer for the disk and the wire, so the two cannot drift.
