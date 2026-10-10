@@ -25,17 +25,21 @@ categories = ["development-tools"]
 
 [dependencies]
 # The published kernel, the SAME one the hosts link, so a host carries exactly one
-# `ikigai-core`. **0.1.86 is the true minimum, and it is a SECURITY floor, not an API
-# one**: it is where exclusions became sticky under `Capability::attenuate` (ledger #858)
+# `ikigai-core`. **0.1.86 is the LIBRARY's true minimum, and it is a SECURITY floor, not
+# an API one**: it is where exclusions became sticky under `Capability::attenuate` (ledger #858)
 # and `is_deny_scope` arrived. A run carries its publisher's exclusions by REQUESTING
 # them in the attenuation; before 0.1.86 attenuate kept only what the runner held, so a
 # publisher's `urn:cap:fs:read:-/root/secret` would have been silently dropped and the
 # script could read what its publisher could not. MEASURED: a scratch crate pinning
 # `=0.1.80` fails to compile (no `is_deny_scope`), `=0.1.86` compiles. The rest is older:
 # `Error::Conflict` (0.1.80), `Invocation::issue_attenuated` (0.1.75).
-# ⚠ `"0.1.86"` is a RANGE, `>=0.1.86, <0.2.0`: when core reaches 0.2 this line must move
+# **0.1.89 since conformance 0.6.0**, a TESTED floor rather than an API one: the library
+# still compiles against 0.1.86, but the conformance dev-dependency needs 0.1.89
+# (`space_iri`, `SPACE_PREFIX`), so no test of this crate can run on anything older, and a
+# floor nothing tests is not a floor this crate can vouch for.
+# ⚠ `"0.1.89"` is a RANGE, `>=0.1.89, <0.2.0`: when core reaches 0.2 this line must move
 # or the crate freezes out of it.
-ikigai-core = "0.1.86"
+ikigai-core = "0.1.89"
 # `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the backend, the
 # host's ceiling and principal stamper), so they are `Endpoint` impls, not closures.
 async-trait = "0.1"
@@ -77,10 +81,12 @@ oxrdf = "0.3.4"
 
 [dev-dependencies]
 futures = "0.3"
-# The module recipe as one test. 0.5.1 is the CURRENT definition of "done" (a verbless
-# `requires` is enforced on every verb since core 0.1.85). ⚠ `"0.5.1"` is `<0.6.0`: raise
-# it when conformance moves, or this crate keeps reporting green against an old rulebook.
-ikigai-conformance = "0.5.1"
+# The module recipe as one test. 0.6.0 is the CURRENT published definition of "done":
+# SPACE-NAME (ledger #987), whose `host_named_space` declaration `tests/conformance.rs`
+# makes for `space(config)`. It needs core 0.1.89, which is why the core pin above is there.
+# ⚠ `"0.6.0"` is `<0.7.0`: raise it when conformance moves (0.6.1 is merged upstream, not
+# yet published), or this crate keeps reporting green against an old rulebook.
+ikigai-conformance = "0.6.0"
 # The evaluator, through the kernel, as a host would mount it. The LIBRARY never links
 # Steel: a script reaches `urn:lisp:eval` as a sub-request, so the language is a resource.
 # 0.1.15 is the published line; 0.2.0 (the allowlist sandbox, ledger #903) is merged but

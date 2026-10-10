@@ -21,7 +21,7 @@ use ikigai_core::{
     Verb,
 };
 use ikigai_script::authority::{Ceiling, CeilingPolicy, PrincipalStamper};
-use ikigai_script::{Backend, MemoryBackend, SpaceConfig};
+use ikigai_script::{Backend, MemoryBackend, ScriptSpace, SpaceConfig};
 
 /// A clock that advances one second per reading, from 2026-09-15T00:00:00Z.
 pub struct TickingClock(AtomicU64);
@@ -104,6 +104,9 @@ fn probes() -> EndpointSpace {
 pub struct Host {
     pub kernel: Kernel,
     pub backend: Arc<dyn Backend>,
+    /// The script space this host's kernel binds: the SAME value, so the conformance suite
+    /// can declare it host-named (`Suite::host_named_space`) and check the space it walks.
+    pub space: Arc<ScriptSpace>,
     pub evals: Arc<AtomicUsize>,
 }
 
@@ -133,8 +136,9 @@ pub fn host_with(
             calls: Arc::clone(&evals),
         },
     );
+    let space = Arc::new(ikigai_script::space(config));
     let root = Fallback::new(vec![
-        Arc::new(ikigai_script::space(config)) as Arc<dyn Space>,
+        Arc::clone(&space) as Arc<dyn Space>,
         Arc::new(lisp) as Arc<dyn Space>,
         Arc::new(probes()) as Arc<dyn Space>,
     ]);
@@ -143,6 +147,7 @@ pub fn host_with(
     Host {
         kernel,
         backend,
+        space,
         evals,
     }
 }
@@ -254,6 +259,9 @@ impl Space for CountingStore {
 pub struct SparqlHost {
     pub kernel: Arc<Kernel>,
     pub backend: Arc<dyn Backend>,
+    /// The script space this host's kernel binds: the SAME value, so the conformance suite
+    /// can declare it host-named (`Suite::host_named_space`) and check the space it walks.
+    pub space: Arc<ScriptSpace>,
     queries: Arc<AtomicUsize>,
     /// Every name the space reported changed, in order.
     pub changed: Arc<std::sync::Mutex<Vec<String>>>,
@@ -299,8 +307,9 @@ pub fn sparql_host_with(
         queries: Arc::clone(&queries),
     };
     let lisp = EndpointSpace::new().bind(Exact::new("urn:lisp:eval"), ikigai_lisp::eval());
+    let space = Arc::new(ikigai_script::space(config));
     let root = Fallback::new(vec![
-        Arc::new(ikigai_script::space(config)) as Arc<dyn Space>,
+        Arc::clone(&space) as Arc<dyn Space>,
         Arc::new(store) as Arc<dyn Space>,
         Arc::new(lisp) as Arc<dyn Space>,
         Arc::new(probes()) as Arc<dyn Space>,
@@ -315,6 +324,7 @@ pub fn sparql_host_with(
     SparqlHost {
         kernel,
         backend,
+        space,
         queries,
         changed,
     }
@@ -399,6 +409,9 @@ fn plan_probes() -> EndpointSpace {
 pub struct PlanHost {
     pub kernel: Arc<Kernel>,
     pub backend: Arc<dyn Backend>,
+    /// The script space this host's kernel binds: the SAME value, so the conformance suite
+    /// can declare it host-named (`Suite::host_named_space`) and check the space it walks.
+    pub space: Arc<ScriptSpace>,
     evals: Arc<AtomicUsize>,
 }
 
@@ -424,8 +437,9 @@ pub fn plan_host_with(ceiling: CeilingPolicy) -> PlanHost {
     let config = SpaceConfig::new(Arc::clone(&backend), ceiling).on_change(hook);
     let evals = Arc::new(AtomicUsize::new(0));
     let lisp = EndpointSpace::new().bind(Exact::new("urn:lisp:eval"), ikigai_lisp::eval());
+    let space = Arc::new(ikigai_script::space(config));
     let root = Fallback::new(vec![
-        Arc::new(ikigai_script::space(config)) as Arc<dyn Space>,
+        Arc::clone(&space) as Arc<dyn Space>,
         Arc::new(plan::doors(Arc::clone(&evals))) as Arc<dyn Space>,
         Arc::new(lisp) as Arc<dyn Space>,
         Arc::new(probes()) as Arc<dyn Space>,
@@ -441,6 +455,7 @@ pub fn plan_host_with(ceiling: CeilingPolicy) -> PlanHost {
     PlanHost {
         kernel,
         backend,
+        space,
         evals,
     }
 }
