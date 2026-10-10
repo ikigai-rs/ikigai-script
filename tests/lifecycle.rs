@@ -559,3 +559,68 @@ fn a_cached_fallback_over_a_missing_compiled_form_or_result_is_cut_by_the_publis
         assert_ne!(fallback(), "fallback", "{part}");
     }
 }
+
+/// Publish `source` as `name` on a fresh host, and read a fallback over `…:run:1` before any
+/// run exists, so it is cached. The host, the record's IRI, and whether the fallback is cached.
+fn fallback_over_run_one(name: &str, source: &str) -> (Host, String) {
+    let host = host();
+    publish(&host.kernel, name, source, &[]);
+    let record = format!("urn:script:{name}:run:1");
+    assert_eq!(fallback_of(&host, &record), "fallback");
+    assert!(fallback_cached(&host, &record));
+    (host, record)
+}
+
+fn fallback_of(host: &Host, of: &str) -> String {
+    ok(
+        &host.kernel,
+        Verb::Source,
+        "urn:test:fallback",
+        &[("of", of)],
+    )
+}
+
+fn fallback_cached(host: &Host, of: &str) -> bool {
+    host.kernel.is_cached(
+        &request(Verb::Source, "urn:test:fallback", &[("of", of)]),
+        &Capability::root(),
+    )
+}
+
+/// A run record's ABSENCE is the state a run writes: a composite that caches a fallback over
+/// `…:run:{id}`'s NotFound must be cut by the run that records that id. The record hangs from
+/// `urn:script:{name}:runs`, the thread the kernel cuts after a successful Sink to it.
+#[test]
+fn a_cached_fallback_over_a_run_not_yet_recorded_is_cut_by_the_run() {
+    let (host, record) = fallback_over_run_one("fine", "(+ 1 1)");
+    ok(&host.kernel, Verb::Sink, "urn:script:fine:runs", &[]);
+    assert!(
+        !fallback_cached(&host, &record),
+        "the run that recorded {record} did not reach the fallback"
+    );
+    assert!(fallback_of(&host, &record).starts_with(&record));
+}
+
+/// ⚠ A FAILED run is recorded too, but the kernel cuts a Sink's target only when the Sink
+/// SUCCEEDS (ikigai-core 0.1.93, `Kernel::issue`), and an endpoint cannot cut a thread itself.
+/// So a fallback over the record of a run that then fails stays cached. Pinned so a core
+/// change that closes it turns this red and the assertion flips.
+#[test]
+fn a_failed_run_does_not_yet_cut_a_fallback_over_its_record() {
+    let (host, record) = fallback_over_run_one("broken", "(car 1)");
+    let ran = call(
+        &host.kernel,
+        &Capability::root(),
+        Verb::Sink,
+        "urn:script:broken:runs",
+        &[],
+    );
+    assert!(ran.is_err(), "{ran:?}");
+    // Recorded: a direct read finds it (a top-level NotFound is never cached).
+    assert!(ok(&host.kernel, Verb::Source, &record, &[]).starts_with(&record));
+    assert!(
+        fallback_cached(&host, &record),
+        "a failed Sink now cuts its target: flip this test and drop the gap from the README"
+    );
+    assert_eq!(fallback_of(&host, &record), "fallback");
+}
