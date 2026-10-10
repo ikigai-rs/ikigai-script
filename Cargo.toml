@@ -15,7 +15,7 @@ rust-version = "1.89"
 # ever builds. The library's own graph is unaffected either way.
 resolver = "3"
 license = "MIT OR Apache-2.0"
-description = "Scripts (Lisp, or SPARQL queries with typed parameters and authority derived from the graphs they name) as resources in any ikigai host: `urn:script:{name}` is an atom with content-addressed versions, a compiled form, a result you read and runs you record, run under the least of what the script declares, what its publisher held at publish time, the host's ceiling and the runner's own capability. A host library: no binary, no elevation."
+description = "Scripts (Lisp; SPARQL queries with typed parameters and authority derived from the graphs they name; or plans, validated before they are stored, with authority derived from their steps) as resources in any ikigai host: `urn:script:{name}` is an atom with content-addressed versions, a compiled form, a result you read and runs you record, run under the least of what the script declares, what its publisher held at publish time, the host's ceiling and the runner's own capability. A host library: no binary, no elevation."
 authors = ["Brian Sletten <brian.sletten@gmail.com>"]
 repository = "https://github.com/ikigai-rs/ikigai-script"
 homepage = "https://github.com/ikigai-rs/ikigai-script"
@@ -64,6 +64,16 @@ spargebra = "0.4.7"
 # A typed parameter's value is checked against its XSD datatype and bound in its canonical
 # form. The same crate oxrdf and the store use for those types. ⚠ `"0.2.3"` is `<0.3.0`.
 oxsdatatypes = "0.2.3"
+# A plan script (`language=plan`) is Turtle, read SHALLOWLY here for the three things this
+# crate decides itself: the process node, every step's verb (read or write) and the declared
+# parameters (the arguments of the script's own catalog entry). Validation, the derived
+# authority and running are the host's plan doors, reached by sub-request. 0.2.4 and 0.3.4
+# are the parser and model oxigraph 0.5.11 uses, and the oxrdf spargebra 0.4.7 pins
+# (`=0.3.4`), so the graph carries one of each; both keep an explicit parse stack, so a
+# deeply nested plan is not a claim on the thread's stack.
+# ⚠ `"0.2.4"` is `<0.3.0` and `"0.3.4"` is `<0.4.0`: move them with spargebra.
+oxttl = "0.2.4"
+oxrdf = "0.3.4"
 
 [dev-dependencies]
 futures = "0.3"

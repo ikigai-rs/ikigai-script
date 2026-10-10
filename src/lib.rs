@@ -70,6 +70,14 @@
 //!   authority it needs (the store's per-graph grants) are all read from the parsed text,
 //!   and parameter values are bound into the parsed algebra, never spliced. Each published
 //!   query is its own catalog entry with its parameters as arguments. See [`sparql`].
+//! - **Plans** (`ik:Process` graphs) reach the host's `urn:plan:eval`. A plan is validated
+//!   by `urn:plan:validate` before it is stored, its authority is DERIVED from its steps'
+//!   contracts by `urn:plan:requires`, and it is a read or a write by its steps' verbs. Each
+//!   published plan is its own catalog entry with its parameters as arguments. See [`plan`].
+//!
+//! **Preference order when assembling anything: a query, then a plan, then Lisp.** The first
+//! two derive their authority and are checked before they run; use Lisp for control flow a
+//! plan cannot express, and preferably as one step inside a plan.
 
 #![deny(missing_docs)]
 
@@ -79,6 +87,7 @@ pub mod endpoints;
 pub mod limits;
 pub mod model;
 pub mod name;
+pub mod plan;
 pub mod sparql;
 
 pub use backend::{Backend, DirBackend, MemoryBackend};

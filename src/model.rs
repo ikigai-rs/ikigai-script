@@ -24,17 +24,22 @@ pub enum Language {
     /// doors (see [`crate::sparql`]). Its form, parameters and authority are read from the
     /// parsed text.
     Sparql,
+    /// A plan: an `ik:Process` graph (Turtle), validated by the host's `urn:plan:validate`
+    /// and run by its `urn:plan:eval` (see [`crate::plan`]). Its authority is derived from
+    /// its steps' contracts, and whether it is a read or a write from its steps' verbs.
+    Plan,
 }
 
 impl Language {
     /// Every language, in the order `language=` offers them.
-    pub const ALL: [Language; 2] = [Language::Lisp, Language::Sparql];
+    pub const ALL: [Language; 3] = [Language::Lisp, Language::Sparql, Language::Plan];
 
     /// The word `language=` takes and every face shows.
     pub fn as_str(self) -> &'static str {
         match self {
             Language::Lisp => "lisp",
             Language::Sparql => "sparql",
+            Language::Plan => "plan",
         }
     }
 
@@ -43,20 +48,25 @@ impl Language {
         match text.trim() {
             "lisp" => Ok(Language::Lisp),
             "sparql" => Ok(Language::Sparql),
+            "plan" => Ok(Language::Plan),
             other => Err(Error::InvalidArgument {
                 name: "language".to_string(),
-                detail: format!("`{other}` is not a script language here; `lisp` or `sparql`"),
+                detail: format!(
+                    "`{other}` is not a script language here; `lisp`, `sparql` or `plan`"
+                ),
             }),
         }
     }
 
     /// The evaluator a Lisp run issues its sub-request to: the language is a resource, so
     /// this crate links no interpreter. `None` for SPARQL, whose door is the HOST's choice
-    /// ([`crate::sparql::SparqlDoor`]) and depends on the query's form.
+    /// ([`crate::sparql::SparqlDoor`]) and depends on the query's form. A plan's is
+    /// [`crate::plan::EVAL`].
     pub fn evaluator(self) -> Option<&'static str> {
         match self {
             Language::Lisp => Some("urn:lisp:eval"),
             Language::Sparql => None,
+            Language::Plan => Some(crate::plan::EVAL),
         }
     }
 
@@ -64,11 +74,13 @@ impl Language {
     /// declares implicitly: evaluating code is itself authority, so a publisher who may not
     /// run Lisp may not publish Lisp for others to run. `None` for SPARQL: a query's
     /// authority is the graphs it names, derived from its text (see
-    /// [`crate::sparql::Analysis::requires`]).
+    /// [`crate::sparql::Analysis::requires`]). `None` for a plan: its authority is what its
+    /// steps' contracts require, derived at publish (see [`crate::plan::derive`]), and
+    /// `urn:plan:eval` declares none of its own.
     pub fn capability(self) -> Option<&'static str> {
         match self {
             Language::Lisp => Some(CAP_LISP),
-            Language::Sparql => None,
+            Language::Sparql | Language::Plan => None,
         }
     }
 }
