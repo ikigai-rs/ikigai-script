@@ -8,9 +8,13 @@ concurrency:
 jobs:
   ci:
     uses: ikigai-rs/.github/.github/workflows/rust.yml@main
-    # No inputs, and each absence is a decision:
-    #
-    # `features:` — this crate declares none.
+    # `features:` — the test-only `http-client-probe` (ledger #1085), which compiles oxigraph's
+    # HTTP client into the test build the way rudof does in ikigai-cli, so
+    # `tests/sparql_service_egress.rs` proves a SERVICE or LOAD script reaches no network, and
+    # its controls prove the client is live. Without this job those tests run only half.
+    with:
+      features: http-client-probe
+    # The other absences are decisions:
     #
     # `wasm-lib:` — not claimed. The library itself is plain Rust, but `DirBackend` is
     # `std::fs`, and a gate that has never run is not evidence. When a browser host wants
