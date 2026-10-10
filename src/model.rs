@@ -89,7 +89,9 @@ impl Language {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
-    /// Saved, not runnable: readable by holders of the script's read grant only.
+    /// Saved, not runnable, and PRIVATE until published: a version that was never published
+    /// is visible only to its author (the principal the host stamped when they wrote it)
+    /// and to root. To every other holder of the script's read or run grant it is absent.
     Draft,
     /// Runnable.
     Published,

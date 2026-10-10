@@ -75,6 +75,10 @@ impl SpaceConfig {
 
     /// How the principal recorded on every publish and run is decided: by the HOST, from
     /// the invocation. The default records [`authority::UNSTAMPED`].
+    ///
+    /// It also decides who sees a draft: a version never published is visible only to the
+    /// principal stamped when it was written (and to root), so under the default, which
+    /// cannot tell callers apart, a draft is root's alone. See [`authority::is_identity`].
     pub fn principal(mut self, stamper: PrincipalStamper) -> SpaceConfig {
         self.principal = stamper;
         self
@@ -233,6 +237,114 @@ fn found(head: Option<Head>, name: &str) -> Result<Head> {
     head.ok_or_else(|| Error::NotFound(format!("no script is published at urn:script:{name}")))
 }
 
+// ---------------------------------------------------------------------------------------
+// Drafts: a version never published is its author's alone
+// ---------------------------------------------------------------------------------------
+
+/// Who may see one version of a script, beyond the read (or run) grant that gates it.
+///
+/// ★ **A draft is visible only to its author until it is published.** The author is the
+/// principal the HOST stamped when the draft was written ([`SpaceConfig::principal`]), the
+/// same value a publish records as the script's publisher, compared with what the host
+/// stamps for the reader now. Never an argument, so no caller can name itself the author.
+/// This only ever NARROWS what a grant reaches: seeing a draft needs the grant AND
+/// authorship, so it can give no one more than their capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sight {
+    /// Published content, or a root caller: an answer that depends on the capability alone,
+    /// cached as it always was.
+    Everyone,
+    /// A version never published, and the caller is its author. Answered, but **never
+    /// cached**: the kernel keys its cache on the capability, and two people holding the
+    /// same capability are two principals, so a cached copy of the author's answer would be
+    /// served to the other.
+    Author,
+    /// A version never published, and the caller is not its author: absent, told exactly
+    /// as a name nobody wrote is (`NotFound`, `false`), so its existence does not leak.
+    /// Not cached either, for the same reason.
+    Hidden,
+}
+
+impl Sight {
+    /// Whether an answer computed under this sight may be cached.
+    fn cacheable(self) -> bool {
+        self == Sight::Everyone
+    }
+}
+
+/// Whether `digest` was ever published under this head: the head published at it, or any
+/// change in its history did. Once published, always: history only grows.
+fn ever_published(head: &Head, digest: &str) -> bool {
+    (head.version == digest && head.state == State::Published)
+        || head
+            .history
+            .iter()
+            .any(|event| event.action == "publish" && event.version == digest)
+}
+
+/// What the caller may see of version `digest` of `head`'s script.
+///
+/// Root sees everything: it is the host's own authority, not a principal's, and holds the
+/// backend the draft is stored in. Its cached answers are root's alone (the cache keys on
+/// the capability).
+fn sight(inv: &Invocation<'_>, shared: &SpaceConfig, head: &Head, digest: &str) -> Sight {
+    if ever_published(head, digest) || inv.capability.is_root() {
+        return Sight::Everyone;
+    }
+    let me = (shared.principal)(inv);
+    let wrote_it = authority::is_identity(&me)
+        && ((head.version == digest && head.publisher == me)
+            || head
+                .history
+                .iter()
+                .any(|e| e.action == "draft" && e.version == digest && e.principal == me));
+    if wrote_it {
+        Sight::Author
+    } else {
+        Sight::Hidden
+    }
+}
+
+/// `found`'s NotFound for a name the caller may read but cannot see: the same words as for
+/// a name nobody wrote, plus, for a caller the host did not stamp (which says nothing about
+/// any one name), why that caller can see no draft at all.
+fn absent(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Error {
+    let mut message = format!("no script is published at urn:script:{name}");
+    if (shared.principal)(inv) == authority::UNSTAMPED && !inv.capability.is_root() {
+        message.push_str(
+            " (this host stamps no principal, so no caller can be shown to be a draft's \
+             author: a draft is visible to root alone until it is published)",
+        );
+    }
+    Error::NotFound(message)
+}
+
+/// The head of `name`, from a gate's answer, if the caller may also SEE the version it
+/// points at; and whether an answer built from it may be cached.
+fn seen_head(
+    inv: &Invocation<'_>,
+    shared: &SpaceConfig,
+    name: &str,
+    gated: Option<Head>,
+) -> Result<(Head, Sight)> {
+    let Some(head) = gated else {
+        return Err(absent(inv, shared, name));
+    };
+    match sight(inv, shared, &head, &head.version) {
+        Sight::Hidden => Err(absent(inv, shared, name)),
+        seen => Ok((head, seen)),
+    }
+}
+
+/// `repr`, cached only when `seen` allows it.
+fn cached_if(repr: Representation, seen: Sight) -> Representation {
+    if seen.cacheable() {
+        repr.cacheable()
+    } else {
+        repr
+    }
+}
+
 fn head_version(shared: &SpaceConfig, head: &Head) -> Result<Version> {
     shared
         .backend
@@ -369,12 +481,22 @@ impl Endpoint for ScriptEndpoint {
         let shared = &self.shared;
         match inv.request.verb {
             Verb::Exists => {
-                let exists = readable_head(inv, shared, &name)?.is_some();
-                Ok(plain(if exists { "true\n" } else { "false\n" }).cacheable())
+                let (exists, seen) = match readable_head(inv, shared, &name)? {
+                    None => (false, Sight::Everyone),
+                    Some(head) => match sight(inv, shared, &head, &head.version) {
+                        Sight::Hidden => (false, Sight::Hidden),
+                        seen => (true, seen),
+                    },
+                };
+                Ok(cached_if(
+                    plain(if exists { "true\n" } else { "false\n" }),
+                    seen,
+                ))
             }
             Verb::Source => {
                 let want = wanted_face(inv)?;
-                let head = found(readable_head(inv, shared, &name)?, &name)?;
+                let (head, seen) =
+                    seen_head(inv, shared, &name, readable_head(inv, shared, &name)?)?;
                 let version = head_version(shared, &head)?;
                 let repr = if want == JSON {
                     json(&ScriptDocument {
@@ -388,7 +510,7 @@ impl Endpoint for ScriptEndpoint {
                 } else {
                     plain(version.source)
                 };
-                Ok(repr.cacheable())
+                Ok(cached_if(repr, seen))
             }
             Verb::Sink => publish(inv, shared, &name).await,
             Verb::Delete => retire(inv, shared, &name),
@@ -485,8 +607,9 @@ impl Endpoint for ScriptEndpoint {
                     .input(
                         ArgSpec::new("state")
                             .summary(
-                                "`published` (runnable) or `draft` (saved, not runnable). \
-                                 To retire, Delete.",
+                                "`published` (runnable) or `draft` (saved, not runnable, \
+                                 and visible only to its author until published). To \
+                                 retire, Delete.",
                             )
                             .class(XSD_STRING)
                             .one_of(["published", "draft"])
@@ -710,28 +833,41 @@ impl Endpoint for VersionEndpoint {
             .get("digest")
             .ok_or_else(|| Error::Endpoint("no `digest` captured".to_string()))?
             .to_string();
-        readable_head(inv, &self.shared, &name)?;
+        let head = readable_head(inv, &self.shared, &name)?;
         let version = self.shared.backend.version(&name, &digest);
+        // A version that exists is seen as its head's history says: one never published is
+        // its author's alone. One with no head at all (a write that lost its race) was never
+        // published either.
+        let seen = match (&version, &head) {
+            (Ok(Some(_)), Some(head)) => sight(inv, &self.shared, head, &digest),
+            (Ok(Some(_)), None) if !inv.capability.is_root() => Sight::Hidden,
+            _ => Sight::Everyone,
+        };
+        let no_such = || Error::NotFound(format!("urn:script:{name} has no version {digest}"));
         match inv.request.verb {
             Verb::Exists => {
                 let exists = match version {
-                    Ok(v) => v.is_some(),
+                    Ok(v) => v.is_some() && seen != Sight::Hidden,
                     Err(Error::InvalidArgument { .. }) => false,
                     Err(other) => return Err(other),
                 };
-                Ok(plain(if exists { "true\n" } else { "false\n" }).cacheable())
+                Ok(cached_if(
+                    plain(if exists { "true\n" } else { "false\n" }),
+                    seen,
+                ))
             }
             Verb::Source => {
                 let want = wanted_face(inv)?;
-                let version = version?.ok_or_else(|| {
-                    Error::NotFound(format!("urn:script:{name} has no version {digest}"))
-                })?;
+                let version = version?.ok_or_else(no_such)?;
+                if seen == Sight::Hidden {
+                    return Err(no_such());
+                }
                 let repr = if want == JSON {
                     json(&version.document(&name))?
                 } else {
                     plain(version.source)
                 };
-                Ok(repr.cacheable())
+                Ok(cached_if(repr, seen))
             }
             other => Err(unsupported("script-version", other)),
         }
@@ -833,17 +969,16 @@ impl Endpoint for CompiledEndpoint {
             return Err(unsupported("script-compiled", inv.request.verb));
         }
         let name = name::from_bindings(inv)?;
-        // Readable by a reader or a runner: a run reads its program here.
-        let head = found(
-            gated_head(
-                inv,
-                &self.shared,
-                &name,
-                &[cap_read(&name), cap_run(&name)],
-                &[CAP_READ_PUBLIC, CAP_RUN_PUBLIC],
-            )?,
+        // Readable by a reader or a runner: a run reads its program here. A draft's program
+        // is its author's alone, so a run of someone else's draft finds nothing to run.
+        let gated = gated_head(
+            inv,
+            &self.shared,
             &name,
+            &[cap_read(&name), cap_run(&name)],
+            &[CAP_READ_PUBLIC, CAP_RUN_PUBLIC],
         )?;
+        let (head, seen) = seen_head(inv, &self.shared, &name, gated)?;
         let version = head_version(&self.shared, &head)?;
         let (evaluator, analysis, plan_analysis) = match version.language {
             Language::Lisp => (LISP_EVAL.to_string(), None, None),
@@ -877,9 +1012,7 @@ impl Endpoint for CompiledEndpoint {
         // ★ Hung from the SCRIPT's thread, which every publish and retire cuts (the kernel
         // cuts the thread named after a Sink's or Delete's target). Without it a cached
         // compiled form would outlive the version it was prepared from.
-        Ok(json(&prepared)?
-            .cacheable()
-            .depends_on(name::script_iri(&name)))
+        Ok(cached_if(json(&prepared)?, seen).depends_on(name::script_iri(&name)))
     }
 
     fn name(&self) -> &str {
@@ -1548,9 +1681,10 @@ struct PerScript {
     runs: Arc<dyn Endpoint>,
     /// Whether its `…:result` is a read it offers (a query, not an update).
     reads: bool,
-    /// Whether it is published, and so listed in the catalog. A draft or a retired script
-    /// still answers under its own contract (its run is refused for its state, not for a
-    /// language capability it never needed), but is not offered.
+    /// Whether it is published, and so listed in the catalog. A draft of content that was
+    /// published before, or a retired script, still answers under its own contract (its run
+    /// is refused for its state, not for a language capability it never needed), but is not
+    /// offered. A draft never published has no contract of its own (see `build`).
     listed: bool,
 }
 
@@ -1624,6 +1758,15 @@ impl ScriptSpace {
     fn build(&self, name: &str) -> Option<PerScript> {
         let shared = &self.shared;
         let head = shared.backend.head(name).ok()??;
+        // ★ A draft never published wears the TEMPLATE's contract. Meta is answered from the
+        // description to anyone who can reach the door (the kernel's, before any endpoint
+        // runs, so it cannot ask who is calling), and a script's own contract is made of its
+        // text: its parameters, its leading comment, the graphs it names. Its own entry would
+        // publish all three, and that the draft exists. Its run is still refused (for its
+        // state, to its author; as absent, to everyone else), now at the template's floor.
+        if !ever_published(&head, &head.version) {
+            return None;
+        }
         let version = shared.backend.version(name, &head.version).ok()??;
         match version.language {
             Language::Lisp => None,
@@ -2279,6 +2422,12 @@ impl Endpoint for CatalogEndpoint {
                 // A broken head is shown to whoever may read the script, so the dashboard
                 // says what is wrong instead of losing the row (or the whole list).
                 Err(e) if own => entry.error = Some(e.to_string()),
+                // Someone else's draft is not listed: to this caller it does not exist.
+                Ok(Some(head))
+                    if sight(inv, &self.shared, &head, &head.version) == Sight::Hidden =>
+                {
+                    continue
+                }
                 Ok(Some(head)) if own || (is_public(&head) && holds(inv, CAP_READ_PUBLIC)) => {
                     entry.state = Some(head.state);
                     entry.public = Some(head.public);

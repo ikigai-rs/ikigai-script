@@ -159,6 +159,27 @@ pub fn unstamped() -> PrincipalStamper {
     Arc::new(|_| UNSTAMPED.to_string())
 }
 
+/// Whether a stamped principal names SOMEONE: anything but [`UNSTAMPED`] and
+/// [`ANONYMOUS`], which a stamper answers for many different callers at once.
+///
+/// It decides who may see a draft. A draft is visible only to its author until it is
+/// published, and the author is the principal the stamper recorded when the draft was
+/// written; two callers stamped [`ANONYMOUS`] are not one person, and a host that stamps
+/// nothing cannot tell any two callers apart. So a draft written under either is nobody's:
+/// only root sees it until it is published. A host whose door cannot identify a caller
+/// stamps [`ANONYMOUS`] rather than inventing a shared name.
+///
+/// ```
+/// use ikigai_script::authority::{is_identity, ANONYMOUS, UNSTAMPED};
+/// assert!(is_identity("urn:example:person:brian"));
+/// assert!(!is_identity(ANONYMOUS));
+/// assert!(!is_identity(UNSTAMPED));
+/// assert!(!is_identity(""));
+/// ```
+pub fn is_identity(principal: &str) -> bool {
+    !principal.trim().is_empty() && principal != UNSTAMPED && principal != ANONYMOUS
+}
+
 /// The host's ceiling for one script: the most it will let that script's runs touch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ceiling {
