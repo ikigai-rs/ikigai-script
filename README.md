@@ -79,6 +79,34 @@ the script exists or not.
 implicitly, so its publisher must hold it, its host ceiling must allow it, and its runner
 must hold it. See "What the host must supply" for what that means for anonymous runs.
 
+## Drafts are private
+
+A draft (`state=draft`, or `urn:script:eval save=`) is visible only to its **author** until it
+is published. The author is the principal the host stamps (see "What the host must supply"),
+the same value a publish records as the script's publisher, compared with what the host stamps
+for the reader: never an argument, so no caller can name itself the author. Seeing a draft
+needs the read (or run) grant AND authorship, so privacy only narrows what a grant reaches.
+
+- To any other caller holding the grant, a draft is **absent**, and told so exactly as a name
+  nobody wrote is: `NotFound` with the same words, `Exists` false, no catalog row, its compiled
+  form (and so its run) not found. `Denied` would tell a reader "someone's draft is here",
+  which is the thing privacy hides. A caller without the grant is `Denied` either way, as
+  before.
+- It is a property of the VERSION: one never published stays its author's after the head
+  moves past it (fetching it by digest finds nothing), retiring a draft does not publish it,
+  and once a version is published it is every reader's for good. Root sees every draft: it is
+  the host's own authority, and holds the backend they are stored in.
+- An author's answer is **never cached**: the kernel keys its cache on the capability, and two
+  people holding the same capability are two principals.
+- A SPARQL query or plan that was never published has **no catalog entry of its own**. `Meta`
+  is answered to anyone who can reach the door, and the script's own contract is made of its
+  text (its parameters and leading comment), so a draft wears the generic contract until it is
+  published.
+- ⚠ **A host that stamps no principal has no authors**: `UNSTAMPED` and `ANONYMOUS` name many
+  callers at once, so a draft written under either is root's alone, and a refusal to an
+  unstamped caller says so. The history in a published script's JSON record still lists each
+  superseded draft's digest and who wrote it; never its content.
+
 ## Mounting it
 
 A host library: no binary. A host mounts `space(config)` beside the evaluator its scripts
@@ -134,8 +162,10 @@ let _ = kernel_cell.set(Arc::downgrade(&kernel));
   `urn:script:{name}:authority`**, or a cached result computed under the old ceiling is
   served until something else cuts it.
 - **The principal**, a function of the invocation (what the host's door authenticated),
-  recorded on every publish and run. Never an argument: a caller cannot name itself. The
-  default records `urn:script:principal:unstamped`.
+  recorded on every publish and run, and the identity a draft is private to. Never an
+  argument: a caller cannot name itself. The default records `urn:script:principal:unstamped`,
+  under which no caller is a draft's author (see "Drafts are private"); stamp
+  `urn:script:principal:anonymous` for a caller the door cannot identify.
 - **A grant for anonymous runs**, if it wants them: `urn:cap:script:run:public`,
   `urn:cap:script:read:public`, and `urn:cap:lisp`. ⚠ The last is not optional: a run is
   a sub-request to `urn:lisp:eval` under the runner's narrowed capability, and narrowing
@@ -370,8 +400,6 @@ A). When it is published, the suite should run once against the real space too.
 - **Triggers** (startup, timers, tuplespace drops, thread cuts, ledger events, webhooks),
   **bindings** (a script as an endpoint, transreptor or overlay), the **stepper**, and
   **signed elevation**: later phases of the design.
-- **Draft privacy**: a draft is readable by any holder of the script's read grant, not
-  only its author.
 - **A Turtle face**: every record is `text/plain` and `application/json`.
 - **For SPARQL**: the SPARQL Protocol face over `urn:script:eval` (ledger #955; `eval` refuses
   `language=sparql` until then); list-valued parameters (an `IN (…)` or `VALUES` over several
