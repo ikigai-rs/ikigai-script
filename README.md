@@ -44,9 +44,8 @@ verbs, its caching, its golden threads and its trace are the kernel's, unchanged
   version; under exactly what capability; when; the outcome; the trace span when the host
   traced) and answers its IRI. A failed run is recorded too, and its error keeps its type
   and names the record. A run record, its absence included, hangs from `urn:script:{name}:runs`,
-  which a successful run cuts. ⚠ A FAILED run is recorded but cuts nothing (the kernel cuts a
-  Sink's target only on success), so a composite that cached a fallback over that record's
-  NotFound keeps serving it until something else cuts the thread.
+  which every run cuts, a failed one included (the kernel cuts a Sink's target when the
+  endpoint ran, whatever it answered; ikigai-core 0.1.95).
 - **Versions are content.** Every publish stores a version named by the sha256 of its
   language, declared capability and source (`sha256:` and hex, the ecosystem's tagged
   digest). The head moves; old versions stay fetchable by name.

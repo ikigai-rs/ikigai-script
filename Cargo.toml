@@ -42,9 +42,13 @@ categories = ["development-tools"]
 # door mints with `with_principal`), which replaced this crate's own principal stamper, and a
 # version's NotFound hangs from its script's thread through `Invocation::depends_on`, which
 # 0.1.93 is the first to carry on a failure. Both arrived in 0.1.93.
-# ⚠ `"0.1.93"` is a RANGE, `>=0.1.93, <0.2.0`: when core reaches 0.2 this line must move
+# **0.1.95 since ledger #1105**, a BEHAVIOR floor: the kernel cuts a Sink's target when the
+# endpoint ran and then failed, so a FAILED run (recorded all the same) cuts
+# `urn:script:{name}:runs` and a cached fallback over its record. Before 0.1.95 only a
+# successful run cut it. The API is unchanged; `tests/lifecycle.rs` pins the behavior.
+# ⚠ `"0.1.95"` is a RANGE, `>=0.1.95, <0.2.0`: when core reaches 0.2 this line must move
 # or the crate freezes out of it.
-ikigai-core = "0.1.93"
+ikigai-core = "0.1.95"
 # `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the backend and the
 # host's ceiling), so they are `Endpoint` impls, not closures.
 async-trait = "0.1"

@@ -2168,9 +2168,9 @@ impl Endpoint for RunEndpoint {
         // NotFound carries it as well as a success (ledger #1079's shape): whether run `{id}`
         // exists is the state a run writes, never anything written through this record's own
         // name, so without it a cached fallback over "no run {id}" outlived the run that
-        // recorded it. ⚠ Only a SUCCESSFUL run cuts it: the kernel cuts a Sink's target on
-        // success alone, and a failed run is recorded all the same, so a fallback over a
-        // failed run's record stays stale (pinned in `tests/lifecycle.rs`).
+        // recorded it. A FAILED run is recorded too, and cuts it as well: the kernel cuts a
+        // Sink's target whenever the endpoint ran (ikigai-core 0.1.95; pinned in
+        // `tests/lifecycle.rs`).
         inv.depends_on(name::part_iri(&name, "runs"));
         // A run record says who ran what: readable by the script's readers and its named
         // runners, never through the public grants.
