@@ -48,7 +48,9 @@
 //!
 //! Three authorities, never merged: **publish** (`urn:cap:script:write:{name}`, and
 //! `…:delete:{name}` to retire), **run** (`urn:cap:script:run:{name}`, or
-//! [`authority::CAP_RUN_PUBLIC`] for a public script), and **runs as**:
+//! [`authority::CAP_RUN_PUBLIC`] for a public script), and **runs as**. Each grant names one
+//! script or a namespace of them (`urn:cap:script:{act}:{namespace}-*`,
+//! [`authority::cap_namespace`]), and [`authority::holds`] decides. A run runs as:
 //!
 //! ```text
 //! runner's capability, attenuated to
@@ -96,6 +98,7 @@ pub mod sparql;
 pub use backend::{Backend, DirBackend, MemoryBackend};
 pub use endpoints::{
     space, Catalog, CatalogEntry, ChangeHook, LastRun, Prepared, ScriptSpace, SpaceConfig,
+    TRANSPORT_ARGUMENTS,
 };
 pub use model::{Head, Language, Outcome, Run, State, Version};
 

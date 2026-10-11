@@ -83,9 +83,19 @@ pub const REQUIRES: &str = "urn:plan:requires";
 pub const MAX_PLAN_BYTES: usize = 1 << 20;
 
 /// Parameter names the doors already use: `in` and `as` are `urn:plan:eval`'s own, `name`
-/// is the script's binding, and `content` is `…:runs`' piped body. A plan declaring one
-/// could never be given it.
-pub const RESERVED_PARAMETERS: [&str; 4] = ["in", "as", "name", "content"];
+/// is the script's binding, `content` is `…:runs`' piped body, and the rest are the
+/// transports' stamps ([`crate::TRANSPORT_ARGUMENTS`]), which a run ignores. A plan
+/// declaring one could never be given it.
+pub const RESERVED_PARAMETERS: [&str; 8] = [
+    "in",
+    "as",
+    "name",
+    "content",
+    "received",
+    "client",
+    "principal",
+    "content-type",
+];
 
 const IK: &str = "https://ikigai-rs.dev/ns#";
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
