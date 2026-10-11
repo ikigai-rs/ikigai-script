@@ -59,11 +59,14 @@ serde_json = "1"
 # A version's name is its content: `sha256:` + hex, the TAGGED digest convention
 # ikigai-sign set and ikigai-log and ikigai-ledger took (ecosystem decision: tag, do not
 # multihash), so a version digest joins theirs in a query instead of colliding.
-# ⚠ 0.11, not 0.10, and the reason is not this crate's: spareval (oxigraph's evaluator, reached
-# here through the ikigai-store dev-dependency) takes sha1, sha2 and md-5 each as
-# `>=0.10, <0.12`, independently, so a `sha2 = "0.10"` here held sha2 at 0.10 while a fresh
-# resolve took sha1 0.11, and spareval stopped compiling (two `digest` crates). 0.11 is what a
-# fresh resolve of the store takes, and its MSRV is 1.85.
+# 0.11 matches what a fresh resolve gives spareval (oxigraph's evaluator, reached here through
+# the ikigai-store dev-dependency), so the graph carries one sha2; its MSRV is 1.85. ⚠ It is NOT
+# a defense of spareval: spareval takes md-5, sha1 and sha2 as independent `>=0.10,<0.12`
+# edges, and a direct dependency never constrains another crate's edge. The break seen here was
+# a LOCAL lock (this repo's lock is gitignored, so CI always resolves fresh and never mixes)
+# holding sha2 0.10 while an incremental resolve took md-5/sha1 0.11 for spareval. The fix for
+# that is `cargo update -p sha2@<the stale 0.10.x>` (never --precise); ikigai-devtools' `just
+# lock-lint` checks committed locks for it daily (ledger #1148, #1195).
 sha2 = "0.11"
 # SPARQL scripts are PARSED here, never evaluated: the form, the declared parameters, the
 # graphs a query names (its derived authority) and the substitution of parameter values all
@@ -115,6 +118,13 @@ ikigai-vocab = "0.1.47"
 # itself, and the store's refusal is the second layer, which the egress test pins too.
 # ⚠ `"0.2.10"` is `>=0.2.10, <0.3.0`.
 ikigai-store = "0.2.10"
+# The module a plan's steps read in `tests/root_plan.rs` (ledger #1220): a plan whose one step
+# is `Source urn:iki:ledger:{L}:next` or `…:items`, run under gonk's script ceiling copied
+# verbatim. Its reads DECLARE families (`urn:cap:ledger:read:*`, `urn:cap:store:read:graph:*`)
+# and CHECK exact per-ledger tokens inside, which is the case a run's derived authority has
+# to meet. 0.8.0 is the published line (0.9.0 adds `count` and changes nothing these reads
+# declare). The library never links it. ⚠ `"0.8.0"` is `<0.9.0`.
+ikigai-ledger = "0.8.0"
 # Only for the egress test's CONTROL (`tests/sparql_service_egress.rs`): oxigraph's own
 # evaluator, with no ikigai layer, really does reach a local stub in the probe build, so "the
 # stub saw nothing" is not vacuous. No default features: the probe feature adds the client.

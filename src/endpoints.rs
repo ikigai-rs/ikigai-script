@@ -1173,6 +1173,17 @@ enum Door {
 struct Planned {
     request: Request,
     keep: BTreeSet<String>,
+    /// What a refusal of this run should also say: why the run held only family markers
+    /// (ledger #1220). Set only for a plan run that keeps one.
+    note: Option<String>,
+}
+
+/// A run's refusal, with the run's [`Planned::note`] said after it when there is one.
+fn explain(note: Option<&str>, error: Error) -> Error {
+    match (note, error) {
+        (Some(note), Error::Denied(message)) => Error::Denied(format!("{message}. {note}")),
+        (_, error) => error,
+    }
 }
 
 /// The run's sub-request, for whichever language the script is in.
@@ -1196,6 +1207,7 @@ async fn prepare_request(
             Ok(Planned {
                 request: lisp_request(&prepared.program, data)?,
                 keep,
+                note: None,
             })
         }
         Language::Sparql => plan_sparql(inv, shared, prepared, keep, ceiling, through).await,
@@ -1245,9 +1257,27 @@ fn plan_eval_request(
         .collect();
     let values = given_parameters(inv, name, &declared, through)?;
     let face = optional(inv, "as")?;
+    let keep = plan::expand_families(keep, inv.capability, ceiling);
+    let markers = plan::markers(&keep);
+    let note = (!markers.is_empty()).then(|| {
+        format!(
+            "urn:script:{name} ran holding {} only as a family: a family held is not a grant, \
+             so a step whose module checks an exact token under it is refused. Neither the \
+             runner nor the host's ceiling for this script names a member (a step's contract \
+             declares the family, never the member, and root holds no list to pick one from). \
+             Run it under a capability that holds the exact grants, or have the host's \
+             ceiling for urn:script:{name} name them",
+            markers
+                .iter()
+                .map(|m| format!("`{m}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
     Ok(Planned {
         request: plan::eval_request(&prepared.program, &values, face),
-        keep: plan::expand_families(keep, inv.capability, ceiling),
+        keep,
+        note,
     })
 }
 
@@ -1315,7 +1345,11 @@ async fn plan_sparql(
         let request = Request::new(Verb::Sink, iri(&door.query_iri(Form::Update))?)
             .with_arg("content", inline(&bound.text))
             .with_arg("graph", inline(&graph));
-        return Ok(Planned { request, keep });
+        return Ok(Planned {
+            request,
+            keep,
+            note: None,
+        });
     }
 
     let mut extra = BTreeSet::new();
@@ -1384,7 +1418,11 @@ async fn plan_sparql(
         .with_arg("query", inline(&bound.text))
         .with_arg("graph", inline(&graphs))
         .with_arg("as", inline(face));
-    Ok(Planned { request, keep })
+    Ok(Planned {
+        request,
+        keep,
+        note: None,
+    })
 }
 
 /// Refused HERE, naming the exact grant and who withheld it, rather than by the store's
@@ -1617,7 +1655,15 @@ impl Endpoint for ResultEndpoint {
             prepare_request(inv, &self.shared, &prepared, keep, &ceiling, Door::Result).await?;
         // ★ The ONLY authority a run gets: the runner's own capability, narrowed. There is
         // no form that widens, so a script cannot reach past its runner whatever it says.
-        let answer = inv.issue_attenuated(planned.request, planned.keep).await?;
+        let Planned {
+            request,
+            keep,
+            note,
+        } = planned;
+        let answer = inv
+            .issue_attenuated(request, keep)
+            .await
+            .map_err(|e| explain(note.as_deref(), e))?;
         // Cacheable as far as this endpoint is concerned; the kernel folds in the
         // evaluator's expiry (a Lisp program is uncacheable unless it opts in with
         // `(cacheable …)`; a query is as cacheable as the store's answer, which hangs from
@@ -1689,7 +1735,15 @@ impl Endpoint for RunsEndpoint {
             trace_span: inv.trace_span(),
         };
         run.id = shared.backend.start_run(&name, &run)?;
-        let answer = inv.issue_attenuated(planned.request, planned.keep).await;
+        let Planned {
+            request,
+            keep,
+            note,
+        } = planned;
+        let answer = inv
+            .issue_attenuated(request, keep)
+            .await
+            .map_err(|e| explain(note.as_deref(), e));
         run.ended = inv.now().map(|t| t.as_millis());
         match answer {
             Ok(repr) => {
