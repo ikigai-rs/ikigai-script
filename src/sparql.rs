@@ -135,8 +135,18 @@ pub const DATATYPES: [&str; 13] = [
     "anyURI",
 ];
 
-/// Names a parameter may not take: each is an argument a door already reads.
-pub const RESERVED_PARAMETERS: [&str; 3] = ["as", "name", "content"];
+/// Names a parameter may not take: each is an argument a door already reads (`as`, `name`,
+/// `content`) or one a transport stamps ([`crate::TRANSPORT_ARGUMENTS`]: `received`,
+/// `client`, `principal`, `content-type`), which a run ignores.
+pub const RESERVED_PARAMETERS: [&str; 7] = [
+    "as",
+    "name",
+    "content",
+    "received",
+    "client",
+    "principal",
+    "content-type",
+];
 
 /// The result faces of SELECT and ASK, default first.
 pub const RESULT_FACES: [&str; 4] = [

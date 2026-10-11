@@ -78,6 +78,25 @@ Reading a script's source is a fourth grant, `urn:cap:script:read:{name}` (or
 sensitivity from running it. A caller without the grant is refused the same way whether
 the script exists or not.
 
+**Namespaces.** Each of the four may be held for one script or for a NAMESPACE of them:
+`urn:cap:script:{act}:{namespace}-*` covers every name that begins `{namespace}-`
+(`authority::cap_namespace`), so `urn:cap:script:write:team-*` publishes `team-report` and
+`team-a-report` but not `teammate`, `team` or `other`. The act stays spelled out and the
+wildcard comes only at the end, after a `-`: core has no infix wildcard, and a grant to run a
+namespace never publishes in it. An exclusion takes a script or a namespace back out
+(`urn:cap:script:write:-team-payroll`, `urn:cap:script:write:-team-hr-*`) and wins over any
+grant. There is no "every script" grant below root: `urn:cap:script:{act}:*` is spelled like
+the family each door declares ("holds some grant of this act") and grants nothing.
+`authority::holds` is the whole rule; a host filtering what it shows asks it, not
+`Capability::allows`, which matches a held scope exactly and would miss a namespace.
+
+⚠ A published query's or plan's own entry is checked at the kernel's floor before it runs,
+and a description cannot depend on who asks. So a name in a namespace declares its TOP-LEVEL
+namespace as its run gate (`team-a-report` declares `urn:cap:script:run:team-*`,
+`authority::run_floor`) and the exact rule is checked inside: the entry is offered to a holder
+of another grant in the same top-level namespace, who is refused when they call it. A name
+with no `-` keeps its exact gate.
+
 **Evaluating code is itself authority.** Every Lisp script declares `urn:cap:lisp`
 implicitly, so its publisher must hold it, its host ceiling must allow it, and its runner
 must hold it. See "What the host must supply" for what that means for anonymous runs.
@@ -290,6 +309,15 @@ argument the script does not declare (`InvalidArgument`: a binding the query doe
 is refused, never ignored). Through `…:runs` they may also arrive as one JSON object piped as
 `content`.
 
+**The transports' arguments are not parameters** (`TRANSPORT_ARGUMENTS`, ledger #1173).
+`ikigai-web` stamps a write with `received`, `client`, `principal` and the body's
+`content-type`, and `ikigai-quic` stamps `principal` on every verb. A run ignores those four
+names instead of refusing them as undeclared (which made every run for effects through the
+HTTP door a `400`), and no query or plan may declare a parameter by one of them (refused at
+publish, as `as`, `name` and `content` already were). A value a caller puts under one of them
+is ignored the same way: who a run is for is the principal its CAPABILITY names, never an
+argument.
+
 **★ Values are bound as RDF terms, never spliced.** The text is parsed, each parameter's
 variable is replaced by its term in the ALGEBRA (patterns, paths, expressions, templates; a
 projected parameter becomes `(term AS ?p)`), and the store is sent what spargebra serializes
@@ -430,7 +458,9 @@ Bind the three doors (`ikigai-engine`'s plan space, which needs `urn:shacl:valid
 and wire `SpaceConfig::on_change` as for queries: each published plan is its own catalog entry.
 Without the doors, `language=plan` is refused (`this host takes no plans`). A plan typed ad hoc
 runs at `urn:plan:eval` itself, under the caller's own capability: `urn:script:eval` points
-there rather than being a second door onto it.
+there rather than being a second door onto it. `urn:script:eval` runs Lisp and only Lisp, so
+its `urn:cap:lisp` floor is the language it runs, and its contract offers `language=lisp`
+alone; a host without Lisp has no use for it and need not grant it.
 
 ⚠ **Tested against a test double.** The doors ship in `ikigai-engine` 0.1.44, which is not
 published yet, so `tests/common/plan.rs` is a double honoring their contract (ledger #956, part

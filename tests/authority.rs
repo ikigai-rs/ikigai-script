@@ -519,6 +519,48 @@ fn eval_runs_under_the_callers_own_authority_and_nothing_more() {
     ));
 }
 
+/// `urn:script:eval` runs Lisp and only Lisp, so its `urn:cap:lisp` floor is the language it
+/// runs (ledger #1174): its contract offers `language=lisp` alone, and a plan or a query is
+/// pointed at its own door rather than advertised and then refused.
+#[test]
+fn eval_offers_only_the_language_its_floor_is_for() {
+    let host = host();
+    let contract: ikigai_core::Description = serde_json::from_str(&ok(
+        &host.kernel,
+        Verb::Meta,
+        "urn:script:eval",
+        &[("as", "application/json")],
+    ))
+    .unwrap();
+    let sink = contract
+        .action_specs()
+        .into_iter()
+        .find(|a| a.verb == Verb::Sink)
+        .expect("a Sink action");
+    assert_eq!(sink.requires, vec!["urn:cap:lisp".to_string()]);
+    let language = sink
+        .inputs
+        .iter()
+        .find(|i| i.name == "language")
+        .expect("a language argument");
+    assert_eq!(language.one_of, vec!["lisp".to_string()]);
+    for (language, points_at) in [("plan", "urn:plan:eval"), ("sparql", "Protocol")] {
+        match call(
+            &host.kernel,
+            &Capability::root(),
+            Verb::Sink,
+            "urn:script:eval",
+            &[("content", "x"), ("language", language)],
+        ) {
+            Err(Error::InvalidArgument { name, detail }) => {
+                assert_eq!(name, "language");
+                assert!(detail.contains(points_at), "{detail}");
+            }
+            other => panic!("{language}: expected InvalidArgument, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn eval_saves_a_draft_only_with_that_scripts_write_grant() {
     let host = host();

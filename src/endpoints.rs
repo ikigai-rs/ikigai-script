@@ -18,8 +18,8 @@ use ikigai_core::{
 use serde::{Deserialize, Serialize};
 
 use crate::authority::{
-    self, cap_delete, cap_read, cap_run, cap_write, principal_of, Ceiling, CeilingPolicy, CAP_ANY,
-    CAP_DELETE, CAP_LISP, CAP_READ, CAP_READ_PUBLIC, CAP_RUN, CAP_RUN_PUBLIC, CAP_WRITE,
+    self, cap, cap_run, principal_of, Act, Ceiling, CeilingPolicy, CAP_ANY, CAP_DELETE, CAP_LISP,
+    CAP_READ, CAP_READ_PUBLIC, CAP_RUN, CAP_RUN_PUBLIC, CAP_WRITE,
 };
 use crate::backend::Backend;
 use crate::model::{
@@ -176,6 +176,22 @@ fn holds(inv: &Invocation<'_>, scope: &str) -> bool {
     inv.capability.allows(scope)
 }
 
+/// Whether the caller may `act` on `name`: its exact grant or a namespace grant, and no
+/// exclusion naming it ([`authority::holds`]).
+fn may(inv: &Invocation<'_>, act: Act, name: &str) -> bool {
+    authority::holds(inv.capability, act, name)
+}
+
+/// Whether the caller reaches a PUBLIC script through `public` (a `…:public` grant), unless
+/// an exclusion it holds names the script.
+fn may_public(inv: &Invocation<'_>, act: Act, public: &str, name: &str) -> bool {
+    holds(inv, public) && !authority::excluded(inv.capability, act, name)
+}
+
+/// How a refusal says what a script grant can name.
+const GRANT_FORMS: &str = "A script grant names one script (`urn:cap:script:{act}:{name}`) or a \
+     namespace of them (`urn:cap:script:{act}:{namespace}-*`)";
+
 /// Public and published: what the `…:public` grants reach.
 fn is_public(head: &Head) -> bool {
     head.public && head.state == State::Published
@@ -187,41 +203,51 @@ fn is_public(head: &Head) -> bool {
 /// whether the script exists or not, unless it is public and they hold
 /// [`CAP_READ_PUBLIC`]. Only a caller who may read it learns that it is absent.
 fn readable_head(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Result<Option<Head>> {
-    gated_head(inv, shared, name, &[cap_read(name)], &[CAP_READ_PUBLIC])
+    gated_head(inv, shared, name, &[(Act::Read, CAP_READ_PUBLIC)])
 }
 
-/// The head of `name` if the caller holds one of `exact`, or the script is public and they
-/// hold one of `public`. Otherwise `Denied`, naming both.
+/// The head of `name` if the caller may do one of `acts` to it ([`may`]), or the script is
+/// public and they hold that act's public grant. Otherwise `Denied`, naming both.
 fn gated_head(
     inv: &Invocation<'_>,
     shared: &SpaceConfig,
     name: &str,
-    exact: &[String],
-    public: &[&str],
+    acts: &[(Act, &str)],
 ) -> Result<Option<Head>> {
-    if exact.iter().any(|s| holds(inv, s)) {
+    if acts.iter().any(|(act, _)| may(inv, *act, name)) {
         return shared.backend.head(name);
     }
     if let Ok(Some(head)) = shared.backend.head(name) {
-        if is_public(&head) && public.iter().any(|s| holds(inv, s)) {
+        if is_public(&head)
+            && acts
+                .iter()
+                .any(|(act, public)| may_public(inv, *act, public, name))
+        {
             return Ok(Some(head));
         }
     }
     Err(Error::Denied(format!(
-        "this capability holds none of {} — nor, for a public script, {}. A script grant \
-         names exactly one script",
-        exact.join(", "),
-        public.join(", ")
+        "this capability holds none of {} — nor, for a public script, {}. {GRANT_FORMS}, and \
+         an exclusion (`…:-{{name}}`) takes one back out",
+        acts.iter()
+            .map(|(act, _)| cap(*act, name))
+            .collect::<Vec<_>>()
+            .join(", "),
+        acts.iter()
+            .map(|(_, public)| *public)
+            .collect::<Vec<_>>()
+            .join(", ")
     )))
 }
 
-fn require(inv: &Invocation<'_>, scope: &str, doing: &str) -> Result<()> {
-    if holds(inv, scope) {
+fn require(inv: &Invocation<'_>, act: Act, name: &str, doing: &str) -> Result<()> {
+    if may(inv, act, name) {
         Ok(())
     } else {
         Err(Error::Denied(format!(
-            "{doing} needs `{scope}`, which this capability does not hold. A script grant \
-             names exactly one script"
+            "{doing} needs `{}`, which this capability does not hold. {GRANT_FORMS}, and an \
+             exclusion (`…:-{{name}}`) takes one back out",
+            cap(act, name)
         )))
     }
 }
@@ -638,7 +664,7 @@ impl Endpoint for ScriptEndpoint {
 }
 
 async fn publish(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Result<Representation> {
-    require(inv, &cap_write(name), "publishing a script")?;
+    require(inv, Act::Write, name, "publishing a script")?;
     let source = inv.inline_str("content")?;
     let language = optional(inv, "language")?
         .map(Language::parse)
@@ -788,7 +814,7 @@ fn door(shared: &SpaceConfig) -> Result<&SparqlDoor> {
 }
 
 fn retire(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Result<Representation> {
-    require(inv, &cap_delete(name), "retiring a script")?;
+    require(inv, Act::Delete, name, "retiring a script")?;
     let current = found(shared.backend.head(name)?, name)?;
     let iri = name::script_iri(name);
     if current.state == State::Retired {
@@ -989,8 +1015,7 @@ impl Endpoint for CompiledEndpoint {
             inv,
             &self.shared,
             &name,
-            &[cap_read(&name), cap_run(&name)],
-            &[CAP_READ_PUBLIC, CAP_RUN_PUBLIC],
+            &[(Act::Read, CAP_READ_PUBLIC), (Act::Run, CAP_RUN_PUBLIC)],
         )?;
         let head = seen_head(inv, &name, gated)?;
         let version = head_version(&self.shared, &head)?;
@@ -1084,10 +1109,12 @@ async fn prepare_run(
         )));
     }
     let public = prepared.public && prepared.state == State::Published;
-    let may_run = holds(inv, &cap_run(name)) || (public && holds(inv, CAP_RUN_PUBLIC));
+    let may_run =
+        may(inv, Act::Run, name) || (public && may_public(inv, Act::Run, CAP_RUN_PUBLIC, name));
     if !may_run {
         return Err(Error::Denied(format!(
-            "running urn:script:{name} needs `{}`{}",
+            "running urn:script:{name} needs `{}` or a namespace grant covering it{}. \
+             {GRANT_FORMS}, and an exclusion (`…:-{{name}}`) takes one back out",
             cap_run(name),
             if prepared.public {
                 format!(" (or `{CAP_RUN_PUBLIC}`, since it is public)")
@@ -1437,6 +1464,33 @@ fn parameter_values(
     Ok(values)
 }
 
+/// The argument names a TRANSPORT owns, which a run never reads as a script's parameters
+/// (ledger #1173).
+///
+/// `ikigai-web` stamps a write with its provenance, `received`, `client` and `principal`,
+/// read off the connection, and with the body's `content-type`; `ikigai-quic` stamps
+/// `principal` on every verb. Each is the door's statement about the request, never the
+/// caller's, and none is an input to a script: who a request is from reaches a run in its
+/// CAPABILITY (`Capability::with_principal`, read with [`authority::principal_of`]), which
+/// is what every run and publish records.
+///
+/// So the doors of this crate ignore these names wherever a script's parameters are read
+/// (`…:result` and `…:runs`, for a query and a plan), instead of refusing them as arguments
+/// the script does not declare — which made every run for effects through the HTTP door a
+/// `400` — and no script may declare a parameter by one of them (refused at publish; see
+/// [`sparql::RESERVED_PARAMETERS`] and [`plan::RESERVED_PARAMETERS`]). A value a CALLER
+/// supplies under one of them (where a door passes it through) is ignored the same way, so
+/// it can neither reach a script nor stand in for the principal.
+///
+/// ```
+/// use ikigai_script::TRANSPORT_ARGUMENTS;
+/// for owned in TRANSPORT_ARGUMENTS {
+///     assert!(ikigai_script::sparql::RESERVED_PARAMETERS.contains(&owned), "{owned}");
+///     assert!(ikigai_script::plan::RESERVED_PARAMETERS.contains(&owned), "{owned}");
+/// }
+/// ```
+pub const TRANSPORT_ARGUMENTS: [&str; 4] = ["received", "client", "principal", "content-type"];
+
 /// The parameters a run was GIVEN, as text, for a script that declares `declared` (each
 /// parameter's name, and whether a run must give it).
 ///
@@ -1445,6 +1499,12 @@ fn parameter_values(
 /// argument the script does not declare are `InvalidArgument`: a binding the script does not
 /// mention is refused, never ignored, so a filter you thought was applied can never silently
 /// not be. Refused here, before a run is recorded: nothing ran.
+///
+/// The one exception is [`TRANSPORT_ARGUMENTS`]: a door's own stamps, ignored, never bound.
+/// `declared` never holds one: the parameters are read again from the source each time the
+/// compiled form is prepared, and that read refuses a reserved name, so a script stored
+/// before they were reserved that declares one fails there, naming it, and never runs with
+/// the parameter silently unbound.
 fn given_parameters(
     inv: &Invocation<'_>,
     name: &str,
@@ -1467,6 +1527,7 @@ fn given_parameters(
     };
     for arg in inv.request.args.keys() {
         let known = arg == "as"
+            || TRANSPORT_ARGUMENTS.contains(&arg.as_str())
             || (through == Door::Runs && arg == "content")
             || declared.iter().any(|(p, _)| p == arg);
         if !known {
@@ -2005,8 +2066,10 @@ impl ScriptSpace {
 /// `spec` with a script's own `inputs`, the run gate and every scope its version requires.
 ///
 /// The run gate, as the kernel can check it before the endpoint is entered: the script's own
-/// grant, or for a public one the family (its own grant OR the public one, which `requires`
-/// cannot say any other way: it is all-of).
+/// grant, or the family of its top-level namespace when it is in one, so a namespace grant
+/// is not refused at the floor ([`authority::run_floor`]); for a public one, the family of
+/// every run grant (its own grant OR the public one, which `requires` cannot say any other
+/// way: it is all-of). The exact rule is checked inside, by [`prepare_run`].
 fn contracted(
     mut spec: ActionSpec,
     inputs: &[ArgSpec],
@@ -2020,7 +2083,7 @@ fn contracted(
     spec = spec.requires(if head.public {
         CAP_RUN.to_string()
     } else {
-        cap_run(name)
+        authority::run_floor(name)
     });
     for scope in &version.requires {
         spec = spec.requires(scope.clone());
@@ -2174,11 +2237,11 @@ impl Endpoint for RunEndpoint {
         inv.depends_on(name::part_iri(&name, "runs"));
         // A run record says who ran what: readable by the script's readers and its named
         // runners, never through the public grants.
-        if !holds(inv, &cap_read(&name)) && !holds(inv, &cap_run(&name)) {
+        if !may(inv, Act::Read, &name) && !may(inv, Act::Run, &name) {
             return Err(Error::Denied(format!(
-                "a run record of urn:script:{name} needs `{}` or `{}`",
-                cap_read(&name),
-                cap_run(&name)
+                "a run record of urn:script:{name} needs `{}` or `{}`. {GRANT_FORMS}",
+                cap(Act::Read, &name),
+                cap(Act::Run, &name)
             )));
         }
         let id_text = inv
@@ -2345,11 +2408,16 @@ impl Endpoint for EvalEndpoint {
                     .input(
                         ArgSpec::new("language")
                             .summary(
-                                "The code's language: `lisp` (SPARQL here is the Protocol \
-                                 face, not in this version; a plan runs at urn:plan:eval).",
+                                "The code's language: `lisp`, the one this door runs, so the \
+                                 one its `requires` (`urn:cap:lisp`) is for. A plan runs at \
+                                 urn:plan:eval, which declares no language capability; SPARQL \
+                                 here is the Protocol face, not in this version.",
                             )
                             .class(XSD_STRING)
-                            .one_of(Language::ALL.map(Language::as_str))
+                            // ★ Only what this door runs (ledger #1174): offering `sparql` and
+                            // `plan` here advertised values it always refuses, under a floor
+                            // (`urn:cap:lisp`) that only Lisp needs.
+                            .one_of([Language::Lisp.as_str()])
                             .default_value("lisp")
                             .optional(),
                     )
@@ -2435,7 +2503,7 @@ impl Endpoint for CatalogEndpoint {
         // Each row's last run in full, for the graph face (a catalog row keeps less).
         let mut last_runs = Vec::new();
         for name in backend.names()? {
-            let own = holds(inv, &cap_read(&name));
+            let own = may(inv, Act::Read, &name);
             let mut entry = CatalogEntry {
                 iri: name::script_iri(&name),
                 name: name.clone(),
@@ -2452,7 +2520,11 @@ impl Endpoint for CatalogEndpoint {
                 Err(e) if own => entry.error = Some(e.to_string()),
                 // Someone else's draft is not listed: to this caller it does not exist.
                 Ok(Some(head)) if sight(inv, &head, &head.version) == Sight::Hidden => continue,
-                Ok(Some(head)) if own || (is_public(&head) && holds(inv, CAP_READ_PUBLIC)) => {
+                Ok(Some(head))
+                    if own
+                        || (is_public(&head)
+                            && may_public(inv, Act::Read, CAP_READ_PUBLIC, &name)) =>
+                {
                     entry.state = Some(head.state);
                     entry.public = Some(head.public);
                     entry.version = Some(head.version);
