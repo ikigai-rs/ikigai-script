@@ -131,8 +131,9 @@ fn a_stamped_principal_is_never_who_a_run_is_recorded_for() {
 
 #[test]
 fn a_plan_run_is_not_refused_for_its_stamps() {
-    let host = plan_host();
-    const HELLO: &str = r#"@prefix ik: <https://ikigai-rs.dev/ns#> .
+    both(|doors| {
+        let host = plan_host_of(doors);
+        const HELLO: &str = r#"@prefix ik: <https://ikigai-rs.dev/ns#> .
 <urn:plan:hello> a ik:Process ;
     ik:input <urn:plan:hello:input:who> ;
     ik:step <urn:plan:hello:step:1> ;
@@ -143,26 +144,27 @@ fn a_plan_run_is_not_refused_for_its_stamps() {
 <urn:plan:hello:step:1:arg:who> a ik:Argument ; ik:inputName "who" ;
     ik:ref <urn:plan:hello:var:who> .
 "#;
-    publish(&host.kernel, "hello", HELLO, &[("language", "plan")]);
-    let answer = call(
-        &host.kernel,
-        &Capability::root(),
-        Verb::Source,
-        "urn:script:hello:result",
-        &[("who", "brian"), ("principal", "urn:iki:gonk:client:abc")],
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(answer, "hello, brian");
-    let mut args = vec![("who", "brian")];
-    args.extend_from_slice(&WEB_WRITE_STAMPS);
-    call(
-        &host.kernel,
-        &Capability::root(),
-        Verb::Sink,
-        "urn:script:hello:runs",
-        &args,
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
+        publish(&host.kernel, "hello", HELLO, &[("language", "plan")]);
+        let answer = call(
+            &host.kernel,
+            &Capability::root(),
+            Verb::Source,
+            "urn:script:hello:result",
+            &[("who", "brian"), ("principal", "urn:iki:gonk:client:abc")],
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(answer, "hello, brian");
+        let mut args = vec![("who", "brian")];
+        args.extend_from_slice(&WEB_WRITE_STAMPS);
+        call(
+            &host.kernel,
+            &Capability::root(),
+            Verb::Sink,
+            "urn:script:hello:runs",
+            &args,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    });
 }
 
 #[test]
@@ -189,10 +191,11 @@ fn a_script_cannot_declare_a_name_the_transports_own() {
 
 #[test]
 fn a_plan_cannot_declare_a_name_the_transports_own() {
-    let host = plan_host();
-    for stamp in ["received", "client", "principal", "content-type"] {
-        let text = format!(
-            r#"@prefix ik: <https://ikigai-rs.dev/ns#> .
+    both(|doors| {
+        let host = plan_host_of(doors);
+        for stamp in ["received", "client", "principal", "content-type"] {
+            let text = format!(
+                r#"@prefix ik: <https://ikigai-rs.dev/ns#> .
 <urn:plan:p> a ik:Process ;
     ik:input <urn:plan:p:input:x> ;
     ik:step <urn:plan:p:step:1> ;
@@ -203,20 +206,21 @@ fn a_plan_cannot_declare_a_name_the_transports_own() {
 <urn:plan:p:step:1:arg:who> a ik:Argument ; ik:inputName "who" ;
     ik:ref <urn:plan:p:var:{stamp}> .
 "#
-        );
-        match call(
-            &host.kernel,
-            &Capability::root(),
-            Verb::Sink,
-            "urn:script:owned",
-            &[("content", &text), ("language", "plan")],
-        ) {
-            Err(Error::InvalidArgument { detail, .. }) => {
-                assert!(detail.contains(stamp), "{detail}")
-            }
-            other => {
-                panic!("`{stamp}` as a plan parameter: expected InvalidArgument, got {other:?}")
+            );
+            match call(
+                &host.kernel,
+                &Capability::root(),
+                Verb::Sink,
+                "urn:script:owned",
+                &[("content", &text), ("language", "plan")],
+            ) {
+                Err(Error::InvalidArgument { detail, .. }) => {
+                    assert!(detail.contains(stamp), "{detail}")
+                }
+                other => {
+                    panic!("`{stamp}` as a plan parameter: expected InvalidArgument, got {other:?}")
+                }
             }
         }
-    }
+    });
 }

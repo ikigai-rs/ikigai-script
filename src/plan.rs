@@ -611,12 +611,23 @@ pub async fn derive(
 /// The scopes a plan run is issued under, with every derived FAMILY (`prefix*`) turned
 /// into exact grants.
 ///
-/// A family reaches a run's `keep` only as the marker a ROOT publisher's grant leaves
-/// ([`crate::authority::effective`]); a scoped publisher's grant already holds the exact
-/// members it had. Attenuation keeps grants by exact name, so the marker is replaced here:
+/// A family reaches a run's `keep` as the marker a ROOT publisher's grant leaves
+/// ([`crate::authority::effective`]), or as a family a scoped publisher HELD under the
+/// declared one (a namespace grant: `…:run:team-*` or `…:run:team-a-*` under a step's
+/// `…:run:team-*`); otherwise a scoped publisher's grant holds the exact members it had.
+/// Attenuation keeps grants by exact name, so the marker is replaced here:
 ///
 /// - a scoped runner: each grant the runner holds under the prefix that the host's ceiling
-///   allows (the publisher, root, held all of them);
+///   allows (the publisher held the whole family). That includes a FAMILY the runner holds
+///   under it, which a module may honor as a grant: a runner holding exactly the script
+///   namespace grant `urn:cap:script:run:team-*` keeps it under the marker
+///   `urn:cap:script:run:team-*` (ledger #1222; it was dropped, and a step calling
+///   `urn:script:team-x:result` was refused). Never wider: a runner's grant ABOVE the
+///   prefix (`urn:cap:script:run:*` under `…:run:team-*`) is not under it, and a ceiling
+///   admits a runner's family only when one of its lines covers it as written (a ceiling
+///   naming only `…:run:team-x` admits no `…:run:team-*`, and attenuation cannot narrow
+///   a held family to a member the runner does not hold by name, so that run fails
+///   closed);
 /// - a root runner: each exact grant under the prefix that the ceiling NAMES, and, as a
 ///   marker, the MEET of the family and the ceiling: the family itself when the ceiling
 ///   allows it whole (no ceiling, or a `prefix*` line at or above it), and each narrower
@@ -650,9 +661,13 @@ pub fn expand_families(
             continue;
         };
         match runner.scopes() {
+            // Every grant the runner holds under the prefix, its own families included (a
+            // script namespace grant, `urn:cap:script:run:team-*`, is a grant: ledger #1222),
+            // when the ceiling admits it as written. Attenuation keeps it only because the
+            // runner holds exactly that string, so nothing wider than the runner survives.
             Some(held) => out.extend(
                 held.iter()
-                    .filter(|s| s.starts_with(prefix) && !s.ends_with('*') && !is_deny_scope(s))
+                    .filter(|s| s.starts_with(prefix) && !is_deny_scope(s))
                     .filter(|s| ceiling.allows(s))
                     .cloned(),
             ),
@@ -679,7 +694,9 @@ pub fn expand_families(
 
 /// The family markers a run's `keep` still carries after [`expand_families`]: what it holds
 /// only as "some grant under this prefix", never a member. Empty for a run every step of
-/// which can name its grants exactly.
+/// which can name its grants exactly. For a SCOPED runner every family left is one the
+/// runner holds itself (a namespace grant), so a host explaining a refusal asks this of a
+/// root run.
 pub fn markers(keep: &BTreeSet<String>) -> Vec<&str> {
     keep.iter()
         .filter(|s| s.ends_with('*') && !is_deny_scope(s))
@@ -763,6 +780,51 @@ mod tests {
              <urn:plan:p:input:in> ik:inputName \"in\" .\n"
         );
         assert!(matches!(analyze(&plan), Err(Error::InvalidArgument { .. })));
+    }
+
+    #[test]
+    fn a_scoped_runners_own_family_under_the_marker_is_kept_never_wider() {
+        let keep = set(&["urn:cap:script:run:team-*"]);
+        let runner = Capability::scoped([
+            "urn:cap:script:run:outer",
+            "urn:cap:script:run:team-*",
+            "urn:cap:script:run:team-a-*",
+            "urn:cap:script:run:team-b",
+            "urn:cap:script:run:*",
+            "urn:cap:script:run:-team-x",
+        ]);
+        // Ledger #1222: the runner's namespace grants under the marker are kept; its grant
+        // above the prefix (`run:*`) and outside it are not, nor is an exclusion (the runner's
+        // exclusions travel through attenuation, which keeps them anyway).
+        assert_eq!(
+            expand_families(keep.clone(), &runner, &Ceiling::Unbounded),
+            set(&[
+                "urn:cap:script:run:team-*",
+                "urn:cap:script:run:team-a-*",
+                "urn:cap:script:run:team-b"
+            ])
+        );
+        // The ceiling admits a runner's family only when a line covers it as written.
+        assert_eq!(
+            expand_families(
+                keep.clone(),
+                &runner,
+                &Ceiling::scoped(["urn:cap:script:run:team-a-*", "urn:cap:script:run:team-b"])
+            ),
+            set(&["urn:cap:script:run:team-a-*", "urn:cap:script:run:team-b"])
+        );
+        assert_eq!(
+            expand_families(
+                keep.clone(),
+                &runner,
+                &Ceiling::scoped(["urn:cap:script:run:team-x"])
+            ),
+            set(&[])
+        );
+        // A scoped runner's families are its own grants, not markers nobody named; the run
+        // that keeps them is no wider than the runner.
+        let kept = expand_families(keep, &runner, &Ceiling::scoped(["urn:cap:script:run:*"]));
+        assert!(kept.iter().all(|s| runner.allows(s)), "{kept:?}");
     }
 
     #[test]

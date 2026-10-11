@@ -362,7 +362,8 @@ pub fn seed(kernel: &Kernel, update: &str) {
 }
 
 // ---------------------------------------------------------------------------------------
-// Plans: a host with the plan doors (a test double of part A's contract), and probes
+// Plans: a host with the plan doors (a test double of part A's contract, or the engine's), and
+// probes
 // ---------------------------------------------------------------------------------------
 
 /// The scope `urn:test:greet` declares (so the kernel enforces it).
@@ -377,6 +378,8 @@ pub const CAP_NET: &str = "urn:cap:test:net:*";
 /// - `urn:test:greet` (Source, requires [`CAP_GREET`]): `hello, {who}`, cacheable.
 /// - `urn:test:host` (Source, requires the family [`CAP_NET`]): `reached {host}`, refused
 ///   unless the capability holds `urn:cap:test:net:{host}` exactly.
+/// - `urn:test:held` (Source, requires nothing): `urn:test:whoami`'s answer, taking a fed
+///   value as `in` and ignoring it.
 fn plan_probes() -> EndpointSpace {
     let greet = FnEndpoint::new("greet", |inv: &Invocation<'_>| {
         let who = inv.inline_str("who").unwrap_or("nobody");
@@ -411,13 +414,36 @@ fn plan_probes() -> EndpointSpace {
             .requires(CAP_NET)
             .output("text/plain"),
     );
+    // `urn:test:whoami` with ONE declared input, so a plan step can be FED (`ik:pipeFrom`) and
+    // its answer therefore depends on the step before it: the engine runs and derives only
+    // the steps its result depends on, so a step left dangling never runs there.
+    let held = FnEndpoint::new("held", |inv: &Invocation<'_>| {
+        let text = match inv.capability.scopes() {
+            None => "root".to_string(),
+            Some(scopes) => scopes.iter().cloned().collect::<Vec<_>>().join("\n"),
+        };
+        Ok(Representation::new(ReprType::new("text/plain"), text.into_bytes()).cacheable())
+    })
+    .with_description(
+        Description::new("held")
+            .verb(Verb::Source)
+            .verb(Verb::Meta)
+            .input(
+                ikigai_core::ArgSpec::new("in")
+                    .summary("A value fed from an earlier step; ignored.")
+                    .class("http://www.w3.org/2001/XMLSchema#string")
+                    .optional(),
+            )
+            .output("text/plain"),
+    );
     EndpointSpace::new()
         .bind(Exact::new("urn:test:greet"), greet)
         .bind(Exact::new("urn:test:host"), host)
+        .bind(Exact::new("urn:test:held"), held)
 }
 
-/// A host whose scripts may be plans: scripts, the plan doors (the double, `urn:plan:eval`
-/// counted), Lisp, and the probes. The change hook is wired as a host wires it.
+/// A host whose scripts may be plans: scripts, the plan doors (the double or the engine's,
+/// [`Doors`]; `urn:plan:eval` counted), Lisp, and the probes. The change hook is wired as a host wires it.
 pub struct PlanHost {
     pub kernel: Arc<Kernel>,
     pub backend: Arc<dyn Backend>,
@@ -434,13 +460,81 @@ impl PlanHost {
     }
 }
 
+/// Which plan doors a [`PlanHost`] binds (ledger #1222): the DOUBLE in [`plan`], which states
+/// the contract this crate relies on, or the ENGINE's real ones
+/// (`ikigai_engine::plan_space::space()`, validating through `ikigai_shacl::space()`), which is
+/// what a host binds. Every plan suite runs its cases against both ([`both`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Doors {
+    Double,
+    Engine,
+}
+
+/// The engine's plan doors with the SHACL validator they compose, `urn:plan:eval` counted.
+struct EngineDoors {
+    inner: Fallback,
+    calls: Arc<AtomicUsize>,
+}
+
+impl EngineDoors {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        EngineDoors {
+            inner: Fallback::new(vec![
+                Arc::new(ikigai_engine::plan_space::space()) as Arc<dyn Space>,
+                Arc::new(ikigai_shacl::space()) as Arc<dyn Space>,
+            ]),
+            calls,
+        }
+    }
+}
+
+impl Space for EngineDoors {
+    fn resolve(&self, request: &Request, scope: &ikigai_core::Scope) -> ikigai_core::Resolution {
+        let resolution = self.inner.resolve(request, scope);
+        if request.target.as_str() == ikigai_engine::plan_space::EVAL {
+            let calls = Arc::clone(&self.calls);
+            resolution.map_endpoint(|inner| Arc::new(CountedDyn { inner, calls }))
+        } else {
+            resolution
+        }
+    }
+    fn entries(&self) -> Option<Vec<ikigai_core::SpaceEntry>> {
+        self.inner.entries()
+    }
+}
+
+/// Run `case` against both kinds of plan doors, naming the doors in any failure.
+pub fn both(case: impl Fn(Doors)) {
+    for doors in [Doors::Double, Doors::Engine] {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| case(doors)));
+        if let Err(panic) = outcome {
+            eprintln!("the case above failed against the {doors:?} plan doors");
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
 pub fn plan_host_with(ceiling: CeilingPolicy) -> PlanHost {
     plan_host_over(ceiling, Vec::new())
+}
+
+/// [`plan_host_with`] on the given doors.
+pub fn plan_host_on(doors: Doors, ceiling: CeilingPolicy) -> PlanHost {
+    plan_host_on_over(doors, ceiling, Vec::new())
 }
 
 /// [`plan_host_with`], with `extra` spaces bound behind the probes (a store and a module whose
 /// resources a plan's steps reach, as a host binds them).
 pub fn plan_host_over(ceiling: CeilingPolicy, extra: Vec<Arc<dyn Space>>) -> PlanHost {
+    plan_host_on_over(Doors::Double, ceiling, extra)
+}
+
+/// [`plan_host_over`] on the given doors.
+pub fn plan_host_on_over(
+    doors: Doors,
+    ceiling: CeilingPolicy,
+    extra: Vec<Arc<dyn Space>>,
+) -> PlanHost {
     let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
     let kernel_cell: Arc<std::sync::OnceLock<std::sync::Weak<Kernel>>> =
         Arc::new(std::sync::OnceLock::new());
@@ -459,7 +553,10 @@ pub fn plan_host_over(ceiling: CeilingPolicy, extra: Vec<Arc<dyn Space>>) -> Pla
     let root = Fallback::new(
         [
             Arc::clone(&space) as Arc<dyn Space>,
-            Arc::new(plan::doors(Arc::clone(&evals))) as Arc<dyn Space>,
+            match doors {
+                Doors::Double => Arc::new(plan::doors(Arc::clone(&evals))) as Arc<dyn Space>,
+                Doors::Engine => Arc::new(EngineDoors::new(Arc::clone(&evals))) as Arc<dyn Space>,
+            },
             Arc::new(lisp) as Arc<dyn Space>,
             Arc::new(probes()) as Arc<dyn Space>,
             Arc::new(plan_probes()) as Arc<dyn Space>,
@@ -486,4 +583,12 @@ pub fn plan_host_over(ceiling: CeilingPolicy, extra: Vec<Arc<dyn Space>>) -> Pla
 /// A plan host with no ceiling.
 pub fn plan_host() -> PlanHost {
     plan_host_with(ikigai_script::authority::same_for_all(Ceiling::unbounded()))
+}
+
+/// [`plan_host`] on the given doors.
+pub fn plan_host_of(doors: Doors) -> PlanHost {
+    plan_host_on(
+        doors,
+        ikigai_script::authority::same_for_all(Ceiling::unbounded()),
+    )
 }

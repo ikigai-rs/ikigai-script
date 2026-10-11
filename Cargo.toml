@@ -125,6 +125,19 @@ ikigai-store = "0.2.10"
 # to meet. 0.8.0 is the published line (0.9.0 adds `count` and changes nothing these reads
 # declare). The library never links it. ⚠ `"0.8.0"` is `<0.9.0`.
 ikigai-ledger = "0.8.0"
+# The REAL plan doors (`urn:plan:eval`, `urn:plan:validate`, `urn:plan:requires`), which every
+# plan test runs against beside the double in `tests/common/plan.rs` (ledger #1222): the double
+# states the contract this crate relies on, the engine is what a host binds. `plan-reader` is
+# the feature that compiles `plan_space` (off by default there, for wasm). 0.1.44 is the first
+# published engine with `plan_space`; the library never links it. ⚠ `"0.1.44"` is `<0.2.0`.
+ikigai-engine = { version = "0.1.44", features = ["plan-reader"] }
+# What `urn:plan:validate` composes: the plan doors validate by sub-request to
+# `urn:shacl:validate` with the published shapes, so a host binding the engine's doors binds
+# this beside them. 0.3.3 is the published line. ⚠ It brings rudof, whose `rudof_rdf` turns
+# on `oxigraph/http-client` and oxrdf's `rdf-12` in the TEST build by feature unification: the
+# egress test's refusals hold in that build too, and its live-client controls still run only
+# under `http-client-probe`. ⚠ `"0.3.3"` is `<0.4.0`.
+ikigai-shacl = "0.3.3"
 # Only for the egress test's CONTROL (`tests/sparql_service_egress.rs`): oxigraph's own
 # evaluator, with no ikigai layer, really does reach a local stub in the probe build, so "the
 # stub saw nothing" is not vacuous. No default features: the probe feature adds the client.

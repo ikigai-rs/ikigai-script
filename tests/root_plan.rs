@@ -5,7 +5,7 @@
 //! `capability does not grant urn:cap:store:read:graph:* (declared by urn:iki:ledger:{L}:next)`.
 //! This file reproduces it with `ikigai-ledger` and `ikigai-store` bound as a host binds them,
 //! under gonk's ceiling copied verbatim, for every combination of root and exact publisher and
-//! runner.
+//! runner, on the double's plan doors and the engine's (`common::both`).
 //!
 //! What it shows:
 //!
@@ -91,9 +91,10 @@ fn outside() -> String {
 
 /// A plan host with the store and the ledger bound behind it, one item filed in [`LEDGER`] and
 /// one triple in [`SECRET_GRAPH`] (both as root: neither is under test).
-fn host(ceiling: Ceiling) -> PlanHost {
+fn host(doors: Doors, ceiling: Ceiling) -> PlanHost {
     let store = ikigai_store::DurableStore::in_memory().expect("an in-memory store");
-    let host = plan_host_over(
+    let host = plan_host_on_over(
+        doors,
         same_for_all(ceiling),
         vec![
             Arc::new(ikigai_store::space(store)) as Arc<dyn Space>,
@@ -170,23 +171,25 @@ const READS: [(&str, &str); 2] = [("nextwork", "next"), ("allitems", "items")];
 /// run holds the ledger's exact tokens, because one of the two parties named them.
 #[test]
 fn an_exact_publisher_or_runner_reads_next_and_items_under_gonks_ceiling() {
-    for (publisher, runner) in [
-        (Who::Root, Who::Exact),
-        (Who::Exact, Who::Root),
-        (Who::Exact, Who::Exact),
-    ] {
-        let host = host(gonk());
-        for (name, resource) in READS {
-            publish_as(&host, publisher, name, &reading(name, resource), &[]);
-            let answer = run_as(&host, runner, name, &[]).unwrap_or_else(|e| {
-                panic!("{resource}, published {publisher:?}, run {runner:?}: {e}")
-            });
-            assert!(
-                answer.contains("The first item"),
-                "{resource}, published {publisher:?}, run {runner:?}: {answer}"
-            );
+    both(|doors| {
+        for (publisher, runner) in [
+            (Who::Root, Who::Exact),
+            (Who::Exact, Who::Root),
+            (Who::Exact, Who::Exact),
+        ] {
+            let host = host(doors, gonk());
+            for (name, resource) in READS {
+                publish_as(&host, publisher, name, &reading(name, resource), &[]);
+                let answer = run_as(&host, runner, name, &[]).unwrap_or_else(|e| {
+                    panic!("{resource}, published {publisher:?}, run {runner:?}: {e}")
+                });
+                assert!(
+                    answer.contains("The first item"),
+                    "{resource}, published {publisher:?}, run {runner:?}: {answer}"
+                );
+            }
         }
-    }
+    });
 }
 
 /// ★ Root published, root run, under gonk's family-only ceiling: refused, and the refusal says
@@ -199,24 +202,26 @@ fn an_exact_publisher_or_runner_reads_next_and_items_under_gonks_ceiling() {
 /// would keep exactly them.
 #[test]
 fn root_published_and_root_run_is_refused_legibly_under_a_family_only_ceiling() {
-    let host = host(gonk());
-    for (name, resource) in READS {
-        publish_as(&host, Who::Root, name, &reading(name, resource), &[]);
-        let message = denied(run_as(&host, Who::Root, name, &[]));
-        // The ledger's exact check refuses it (the floor no longer does: the run now holds the
-        // store family the ceiling narrows to, rather than dropping it)...
-        assert!(
-            message.contains(&format!("urn:cap:ledger:read:{LEDGER}")),
-            "{resource}: {message}"
-        );
-        // ...and the script host says the run held only markers, and how to give it members.
-        assert!(
-            message.contains("a family held is not a grant")
-                && message.contains("urn:cap:store:read:graph:urn:iki:ledger:graph:*")
-                && message.contains("ceiling"),
-            "{resource}: {message}"
-        );
-    }
+    both(|doors| {
+        let host = host(doors, gonk());
+        for (name, resource) in READS {
+            publish_as(&host, Who::Root, name, &reading(name, resource), &[]);
+            let message = denied(run_as(&host, Who::Root, name, &[]));
+            // The ledger's exact check refuses it (the floor no longer does: the run now holds the
+            // store family the ceiling narrows to, rather than dropping it)...
+            assert!(
+                message.contains(&format!("urn:cap:ledger:read:{LEDGER}")),
+                "{resource}: {message}"
+            );
+            // ...and the script host says the run held only markers, and how to give it members.
+            assert!(
+                message.contains("a family held is not a grant")
+                    && message.contains("urn:cap:store:read:graph:urn:iki:ledger:graph:*")
+                    && message.contains("ceiling"),
+                "{resource}: {message}"
+            );
+        }
+    });
 }
 
 /// What the root/root run is attenuated to under gonk's ceiling, computed with the library's
@@ -252,15 +257,17 @@ fn a_root_run_keeps_the_meet_of_each_declared_family_and_the_ceiling() {
 /// the ledgers it holds. Root/root then runs holding exactly those members.
 #[test]
 fn a_ceiling_naming_the_members_runs_root_published_root_run() {
-    let mut lines: Vec<String> = GONK_CEILING.iter().map(|s| s.to_string()).collect();
-    lines.extend(ledger_read(LEDGER));
-    let host = host(Ceiling::scoped(lines));
-    for (name, resource) in READS {
-        publish_as(&host, Who::Root, name, &reading(name, resource), &[]);
-        let answer = run_as(&host, Who::Root, name, &[])
-            .unwrap_or_else(|e| panic!("{resource}, root/root, members named: {e}"));
-        assert!(answer.contains("The first item"), "{resource}: {answer}");
-    }
+    both(|doors| {
+        let mut lines: Vec<String> = GONK_CEILING.iter().map(|s| s.to_string()).collect();
+        lines.extend(ledger_read(LEDGER));
+        let host = host(doors, Ceiling::scoped(lines));
+        for (name, resource) in READS {
+            publish_as(&host, Who::Root, name, &reading(name, resource), &[]);
+            let answer = run_as(&host, Who::Root, name, &[])
+                .unwrap_or_else(|e| panic!("{resource}, root/root, members named: {e}"));
+            assert!(answer.contains("The first item"), "{resource}: {answer}");
+        }
+    });
 }
 
 /// ★ A step outside the ceiling is refused in every combination, even when the publisher and
@@ -269,27 +276,29 @@ fn a_ceiling_naming_the_members_runs_root_published_root_run() {
 /// would read the graph.
 #[test]
 fn a_step_outside_the_ceiling_is_refused_in_every_combination() {
-    let secret = format!("urn:cap:store:read:graph:{SECRET_GRAPH}");
-    for (publisher, runner) in [
-        (Who::Root, Who::Root),
-        (Who::Root, Who::Exact),
-        (Who::Exact, Who::Root),
-        (Who::Exact, Who::Exact),
-    ] {
-        let host = host(gonk());
-        publish_as(&host, publisher, "outside", &outside(), &[&secret]);
-        let message = denied(run_as(&host, runner, "outside", &[&secret]));
-        assert!(
-            message.contains("urn:cap:store:read:graph"),
-            "published {publisher:?}, run {runner:?}: {message}"
-        );
-        // Control: with no ceiling the same plan reads the graph for an exact pair, so the
-        // refusal above is the ceiling's and not a broken fixture.
-        if let (Who::Exact, Who::Exact) = (publisher, runner) {
-            let open = self::host(Ceiling::unbounded());
-            publish_as(&open, publisher, "outside", &outside(), &[&secret]);
-            let answer = run_as(&open, runner, "outside", &[&secret]).unwrap();
-            assert!(answer.contains("secret"), "{answer}");
+    both(|doors| {
+        let secret = format!("urn:cap:store:read:graph:{SECRET_GRAPH}");
+        for (publisher, runner) in [
+            (Who::Root, Who::Root),
+            (Who::Root, Who::Exact),
+            (Who::Exact, Who::Root),
+            (Who::Exact, Who::Exact),
+        ] {
+            let host = host(doors, gonk());
+            publish_as(&host, publisher, "outside", &outside(), &[&secret]);
+            let message = denied(run_as(&host, runner, "outside", &[&secret]));
+            assert!(
+                message.contains("urn:cap:store:read:graph"),
+                "published {publisher:?}, run {runner:?}: {message}"
+            );
+            // Control: with no ceiling the same plan reads the graph for an exact pair, so the
+            // refusal above is the ceiling's and not a broken fixture.
+            if let (Who::Exact, Who::Exact) = (publisher, runner) {
+                let open = self::host(doors, Ceiling::unbounded());
+                publish_as(&open, publisher, "outside", &outside(), &[&secret]);
+                let answer = run_as(&open, runner, "outside", &[&secret]).unwrap();
+                assert!(answer.contains("secret"), "{answer}");
+            }
         }
-    }
+    });
 }
