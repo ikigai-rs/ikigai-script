@@ -447,10 +447,25 @@ transrepts the result or refuses. `in`, `as`, `name` and `content` cannot be par
 **A derived family** (a step whose target declares `urn:cap:net:*`, "holds some grant under this
 prefix") is stored as the publisher's own grants under it, or, for a root publisher, as the
 family, which each run turns into the RUNNER's grants under it that the ceiling allows. A root
-runner cannot be enumerated, so it gets the members the ceiling names; under no ceiling it keeps
-the bare family, which the kernel's floor admits and the target's own rule (a host, a path)
-refuses. A host that wants a root-published plan with such a step to run under root lists the
-members in that script's ceiling.
+runner cannot be enumerated, so it gets the members the ceiling names, plus the family itself as a
+MARKER: the meet of the family and the ceiling (the family whole under no ceiling or a line at or
+above it, or the ceiling's own narrower `prefix…*` line). The kernel's floor admits a step under a
+marker, and a target that checks an exact token under it (a host, a path, a ledger's
+`urn:cap:ledger:read:<name>`) refuses it; the refusal then says the run held only markers and
+names the remedy.
+
+**A family held is not a grant, and the steps cannot name the member** (ledger #1220). A step's
+contract declares the family and never the member: the member is the target module's own naming
+(`urn:iki:ledger:next` needs `urn:cap:ledger:read:default`, a word its IRI does not contain), so
+neither this crate nor `urn:plan:requires` can derive it from the plan. So a plan a root
+published, run by root under a ceiling that names only families (gonk's: `urn:cap:ledger:read:*`
+and `urn:cap:store:read:graph:urn:iki:ledger:graph:*`), is refused at a ledger read, while an
+exact publisher or an exact runner runs it. A host that wants it to run under root NAMES the
+members in that script's ceiling (the ceiling policy is asked on every run, so it can list the
+ledgers it holds). Running root unattenuated instead is not equivalent: a step declaring the same
+family can read by argument (the store's scoped query door declares the family the ledger's
+`next` does), and only the members keep it inside the ceiling. `tests/root_plan.rs` pins all
+four combinations and the step outside the ceiling.
 
 ### What a host supplies for plans
 

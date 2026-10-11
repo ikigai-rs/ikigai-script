@@ -617,12 +617,27 @@ pub async fn derive(
 ///
 /// - a scoped runner: each grant the runner holds under the prefix that the host's ceiling
 ///   allows (the publisher, root, held all of them);
-/// - a root runner: each exact grant under the prefix that the ceiling NAMES, and the
-///   family itself only when the ceiling allows the whole family (no ceiling, or a
-///   `prefix*` line). Root cannot be enumerated, so then the run keeps the bare family: the kernel's floor (a presence test) admits the step, and
-///   the target module's own rule (`urn:cap:net:<host>`, `urn:cap:fs:read:<path>`) refuses
-///   it, fail closed. A host that wants a root-published plan with such a step to run under
-///   root lists the members in the script's ceiling.
+/// - a root runner: each exact grant under the prefix that the ceiling NAMES, and, as a
+///   marker, the MEET of the family and the ceiling: the family itself when the ceiling
+///   allows it whole (no ceiling, or a `prefix*` line at or above it), and each narrower
+///   `prefix…*` line the ceiling holds under it (ledger #1220: gonk's
+///   `urn:cap:store:read:graph:urn:iki:ledger:graph:*` under a step's
+///   `urn:cap:store:read:graph:*`, which was dropped before, so the floor refused the step
+///   naming a scope it was never short of).
+///
+/// ★ **A marker is not a grant, and a root run cannot do better here.** A step's contract
+/// declares a family and never its member (`Description::requires` is static; the member is
+/// the target module's own naming: `urn:iki:ledger:next` needs `urn:cap:ledger:read:default`,
+/// a word its IRI does not contain), so the plan's step targets do not derive the exact
+/// grants, and root holds no list to pick them from. The kernel's floor (a presence test)
+/// admits a step under a marker; a module whose rule is a held prefix (a script namespace
+/// grant, `urn:cap:script:run:team-*`) honors it; a module that checks an exact token
+/// (`urn:cap:ledger:read:<name>`, `urn:cap:net:<host>`) refuses it, fail closed, and the run
+/// says why ([`markers`]). A host that wants such a step to run under root NAMES the members
+/// in the script's ceiling: the ceiling policy is asked on every run, so it can list what
+/// exists. Running root unattenuated instead would not be equivalent: a step declaring the
+/// same family can read by argument (the store's scoped query door declares exactly the
+/// family `next` declares), and only the members keep it inside the ceiling.
 pub fn expand_families(
     keep: BTreeSet<String>,
     runner: &Capability,
@@ -646,9 +661,10 @@ pub fn expand_families(
                     out.extend(
                         named
                             .iter()
-                            .filter(|s| {
-                                s.starts_with(prefix) && !s.ends_with('*') && !is_deny_scope(s)
-                            })
+                            .filter(|s| s.starts_with(prefix) && !is_deny_scope(s))
+                            // An exact member, or a narrower family: the ceiling's own
+                            // `prefix…*` line is the meet. The family itself, below.
+                            .filter(|s| s.strip_suffix('*') != Some(prefix))
                             .cloned(),
                     );
                 }
@@ -659,6 +675,16 @@ pub fn expand_families(
         }
     }
     out
+}
+
+/// The family markers a run's `keep` still carries after [`expand_families`]: what it holds
+/// only as "some grant under this prefix", never a member. Empty for a run every step of
+/// which can name its grants exactly.
+pub fn markers(keep: &BTreeSet<String>) -> Vec<&str> {
+    keep.iter()
+        .filter(|s| s.ends_with('*') && !is_deny_scope(s))
+        .map(String::as_str)
+        .collect()
 }
 
 /// The request a run issues: `urn:plan:eval` with the plan as `in`, each given parameter by
@@ -766,8 +792,39 @@ mod tests {
         );
         // A ceiling that allows none of the family keeps none of it.
         assert_eq!(
-            expand_families(keep, &Capability::root(), &Ceiling::scoped(["urn:cap:a"])),
+            expand_families(
+                keep.clone(),
+                &Capability::root(),
+                &Ceiling::scoped(["urn:cap:a"])
+            ),
             set(&["urn:cap:a"])
+        );
+        // Root runner, a ceiling NARROWER than the family: the meet, the ceiling's own line
+        // (ledger #1220; it was dropped). A wider line keeps the family itself; an exact
+        // member stays exact; an exclusion is never a marker.
+        let narrower = Ceiling::scoped([
+            "urn:cap:a",
+            "urn:cap:net:example.*",
+            "urn:cap:net:other.org",
+            "urn:cap:net:-example.com/admin",
+        ]);
+        let expanded = expand_families(keep.clone(), &Capability::root(), &narrower);
+        assert_eq!(
+            expanded,
+            set(&[
+                "urn:cap:a",
+                "urn:cap:net:example.*",
+                "urn:cap:net:other.org"
+            ])
+        );
+        assert_eq!(markers(&expanded), ["urn:cap:net:example.*"]);
+        assert_eq!(
+            expand_families(
+                keep,
+                &Capability::root(),
+                &Ceiling::scoped(["urn:cap:a", "urn:cap:*"])
+            ),
+            set(&["urn:cap:a", "urn:cap:net:*"])
         );
     }
 }

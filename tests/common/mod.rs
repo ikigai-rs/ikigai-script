@@ -435,6 +435,12 @@ impl PlanHost {
 }
 
 pub fn plan_host_with(ceiling: CeilingPolicy) -> PlanHost {
+    plan_host_over(ceiling, Vec::new())
+}
+
+/// [`plan_host_with`], with `extra` spaces bound behind the probes (a store and a module whose
+/// resources a plan's steps reach, as a host binds them).
+pub fn plan_host_over(ceiling: CeilingPolicy, extra: Vec<Arc<dyn Space>>) -> PlanHost {
     let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
     let kernel_cell: Arc<std::sync::OnceLock<std::sync::Weak<Kernel>>> =
         Arc::new(std::sync::OnceLock::new());
@@ -450,13 +456,18 @@ pub fn plan_host_with(ceiling: CeilingPolicy) -> PlanHost {
     let evals = Arc::new(AtomicUsize::new(0));
     let lisp = EndpointSpace::new().bind(Exact::new("urn:lisp:eval"), ikigai_lisp::eval());
     let space = Arc::new(ikigai_script::space(config));
-    let root = Fallback::new(vec![
-        Arc::clone(&space) as Arc<dyn Space>,
-        Arc::new(plan::doors(Arc::clone(&evals))) as Arc<dyn Space>,
-        Arc::new(lisp) as Arc<dyn Space>,
-        Arc::new(probes()) as Arc<dyn Space>,
-        Arc::new(plan_probes()) as Arc<dyn Space>,
-    ]);
+    let root = Fallback::new(
+        [
+            Arc::clone(&space) as Arc<dyn Space>,
+            Arc::new(plan::doors(Arc::clone(&evals))) as Arc<dyn Space>,
+            Arc::new(lisp) as Arc<dyn Space>,
+            Arc::new(probes()) as Arc<dyn Space>,
+            Arc::new(plan_probes()) as Arc<dyn Space>,
+        ]
+        .into_iter()
+        .chain(extra)
+        .collect(),
+    );
     let kernel = Arc::new(
         Kernel::with_meta_renderer(Arc::new(root), Arc::new(ikigai_vocab::TurtleRenderer))
             .with_clock(Arc::new(TickingClock::default())),
