@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-script"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 # The toolchain the shared CI's msrv job builds and tests on. Nothing in this crate needs
 # more than edition 2021; 1.89 is the line the ecosystem's other declared crates
