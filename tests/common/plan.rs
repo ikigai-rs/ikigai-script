@@ -2,9 +2,11 @@
 //! in ikigai-cli (`ikigai-engine`'s `plan_space`, cli PR 429): `urn:plan:eval`,
 //! `urn:plan:validate` and `urn:plan:requires`.
 //!
-//! ⚠ Why a double: the real doors ship in `ikigai-engine` 0.1.44, which is merged but not
-//! published, and this repo takes no path overrides. When it is published, the suite should
-//! also run once against `ikigai_engine::plan_space::space()` beside `ikigai_shacl::space()`.
+//! The double is kept now that the real doors are published (`ikigai-engine` 0.1.44 and
+//! later): it states, in one file, the contract this crate relies on, and every plan suite
+//! runs its cases against it AND against `ikigai_engine::plan_space::space()` beside
+//! `ikigai_shacl::space()` (`common::both`, ledger #1222), so a drift between the two fails
+//! a case rather than hiding in the double.
 //!
 //! What it honors, and where it is smaller than the real one:
 //!
@@ -16,6 +18,10 @@
 //! - **requires**: each step's target contract by `Meta as=application/json` (invokes
 //!   nothing), `Description::required_scopes(verb)`, per-step `ik:requires` / `ik:lacks` /
 //!   `ik:outcome`, the plan-level union only when complete. Every step counts as reached.
+//!   ⚠ The engine's does NOT: it derives and runs only the steps the result depends on (its
+//!   `run_order`), so a step left dangling is neither in its derived authority nor run. Every
+//!   fixture here therefore feeds each step into the result (the first run against the real
+//!   doors found two that did not, ledger #1222).
 //! - **eval**: validates first and refuses a non-conforming plan with `InvalidArgument{in}`;
 //!   parameters by name (undeclared: `InvalidArgument{name}`, required with no default:
 //!   `MissingArgument`, optional with none: the argument is omitted); steps run IN ORDER as

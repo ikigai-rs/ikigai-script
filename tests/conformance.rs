@@ -254,7 +254,8 @@ fn a_host_with_sparql_scripts_conforms() {
 
 // ---------------------------------------------------------------------------------------
 // The same walk over a host with the plan doors (the test double of part A's contract,
-// `tests/common/plan.rs`), where each published plan is its own entry.
+// `tests/common/plan.rs`, and the engine's real ones), where each published plan is its own
+// entry.
 // ---------------------------------------------------------------------------------------
 
 const PLAN_READ: &str = r#"# The walk's read plan.
@@ -277,8 +278,8 @@ const PLAN_WRITE: &str = r#"@prefix ik: <https://ikigai-rs.dev/ns#> .
 <urn:plan:walkw:step:1> a ik:Step ; ik:verb "Sink" ; ik:resolves <urn:test:vault> .
 "#;
 
-fn plan_seeded() -> (PlanHost, String) {
-    let host = plan_host();
+fn plan_seeded(doors: Doors) -> (PlanHost, String) {
+    let host = plan_host_of(doors);
     let version = publish(&host.kernel, "walk", "(+ 1 2)", &[]);
     publish(&host.kernel, "retiree", "1", &[]);
     ok(&host.kernel, Verb::Sink, "urn:script:walk:runs", &[]);
@@ -292,53 +293,63 @@ fn plan_seeded() -> (PlanHost, String) {
     (host, digest)
 }
 
-fn plan_suite(digest: &str, space: &Arc<ScriptSpace>) -> Suite {
-    [
-        (
-            "plan-eval",
-            "the host's plan evaluator (here a test double of its contract)",
-        ),
+fn plan_suite(doors: Doors, digest: &str, space: &Arc<ScriptSpace>) -> Suite {
+    let which = match doors {
+        Doors::Double => "here a test double of its contract",
+        Doors::Engine => "here ikigai-engine's, conformance-tested in ikigai-cli",
+    };
+    let mut doors_and_probes = vec![
+        ("plan-eval", format!("the host's plan evaluator ({which})")),
         (
             "plan-validate",
-            "the host's plan validator (here a test double of its contract)",
+            format!("the host's plan validator ({which})"),
         ),
-        (
-            "plan-requires",
-            "the host's derivation (here a test double of its contract)",
-        ),
-        ("greet", "a test probe, not part of this crate"),
-        ("host", "a test probe, not part of this crate"),
-    ]
-    .into_iter()
-    .fold(suite(digest, space), |suite, (id, why)| {
-        suite.opt_out(id, None, why)
-    })
-    .fixture(Fixture::new("script-walkp-result", Verb::Source).arg("who", "conformance"))
-    // A plan run's piped `content` is its parameters as one JSON object.
-    .fixture(Fixture::new("script-walkp-runs", Verb::Sink).arg("content", "{}"))
-    .fixture(Fixture::new("script-walkw-runs", Verb::Sink).arg("content", "{}"))
+        ("plan-requires", format!("the host's derivation ({which})")),
+        ("greet", "a test probe, not part of this crate".to_string()),
+        ("host", "a test probe, not part of this crate".to_string()),
+        ("held", "a test probe, not part of this crate".to_string()),
+    ];
+    if doors == Doors::Engine {
+        doors_and_probes.push((
+            "shacl-validate",
+            "ikigai-shacl's validator, which the engine's plan doors compose; conformance-tested \
+             in ikigai-shacl"
+                .to_string(),
+        ));
+    }
+    doors_and_probes
+        .into_iter()
+        .fold(suite(digest, space), |suite, (id, why)| {
+            suite.opt_out(id, None, &why)
+        })
+        .fixture(Fixture::new("script-walkp-result", Verb::Source).arg("who", "conformance"))
+        // A plan run's piped `content` is its parameters as one JSON object.
+        .fixture(Fixture::new("script-walkp-runs", Verb::Sink).arg("content", "{}"))
+        .fixture(Fixture::new("script-walkw-runs", Verb::Sink).arg("content", "{}"))
 }
 
 #[test]
 fn a_host_with_plan_scripts_conforms() {
-    let (host, digest) = plan_seeded();
-    let report = plan_suite(&digest, &host.space).run_blocking(&host.kernel);
-    println!("{report}");
-    assert!(report.is_clean(), "{report}");
-    let mut walked: Vec<&str> = report
-        .walked
-        .iter()
-        .map(String::as_str)
-        .filter(|id| id.starts_with("script-walk"))
-        .collect();
-    walked.sort_unstable();
-    assert_eq!(
-        walked,
-        vec![
-            "script-walkp-result",
-            "script-walkp-runs",
-            "script-walkw-runs"
-        ],
-        "{report}"
-    );
+    both(|doors| {
+        let (host, digest) = plan_seeded(doors);
+        let report = plan_suite(doors, &digest, &host.space).run_blocking(&host.kernel);
+        println!("{report}");
+        assert!(report.is_clean(), "{report}");
+        let mut walked: Vec<&str> = report
+            .walked
+            .iter()
+            .map(String::as_str)
+            .filter(|id| id.starts_with("script-walk"))
+            .collect();
+        walked.sort_unstable();
+        assert_eq!(
+            walked,
+            vec![
+                "script-walkp-result",
+                "script-walkp-runs",
+                "script-walkw-runs"
+            ],
+            "{report}"
+        );
+    });
 }

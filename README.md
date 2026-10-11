@@ -446,7 +446,13 @@ transrepts the result or refuses. `in`, `as`, `name` and `content` cannot be par
 
 **A derived family** (a step whose target declares `urn:cap:net:*`, "holds some grant under this
 prefix") is stored as the publisher's own grants under it, or, for a root publisher, as the
-family, which each run turns into the RUNNER's grants under it that the ceiling allows. A root
+family, which each run turns into the RUNNER's grants under it that the ceiling allows,
+including a family the runner holds under it: a runner holding exactly the namespace grant
+`urn:cap:script:run:team-*` runs a plan whose step calls `urn:script:team-x:result` (ledger #1222;
+it was dropped, and the step refused). Never wider: a runner's grant above the prefix is not
+under it, and a ceiling admits a runner's family only when one of its lines covers it as
+written (a ceiling naming only `…:run:team-x` admits no `…:run:team-*`, and a held family cannot
+be narrowed to a member the runner does not hold by name, so that run is refused). A root
 runner cannot be enumerated, so it gets the members the ceiling names, plus the family itself as a
 MARKER: the meet of the family and the ceiling (the family whole under no ceiling or a line at or
 above it, or the ceiling's own narrower `prefix…*` line). The kernel's floor admits a step under a
@@ -477,9 +483,11 @@ there rather than being a second door onto it. `urn:script:eval` runs Lisp and o
 its `urn:cap:lisp` floor is the language it runs, and its contract offers `language=lisp`
 alone; a host without Lisp has no use for it and need not grant it.
 
-⚠ **Tested against a test double.** The doors ship in `ikigai-engine` 0.1.44, which is not
-published yet, so `tests/common/plan.rs` is a double honoring their contract (ledger #956, part
-A). When it is published, the suite should run once against the real space too.
+**Tested against both the real doors and a double.** Every plan case runs against
+`ikigai-engine`'s plan space (with `ikigai-shacl` beside it) AND against `tests/common/plan.rs`,
+a double that states the contract this crate relies on (ledger #956 part A, #1222). ⚠ One
+difference a plan author meets: the engine derives and runs only the steps its result depends
+on, so a step nothing feeds into the result is neither run nor in the plan's authority.
 
 ## Not in this version
 

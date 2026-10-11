@@ -1258,7 +1258,15 @@ fn plan_eval_request(
     let values = given_parameters(inv, name, &declared, through)?;
     let face = optional(inv, "as")?;
     let keep = plan::expand_families(keep, inv.capability, ceiling);
-    let markers = plan::markers(&keep);
+    // Only a ROOT run is left holding a marker nobody named. A scoped run keeps a family only
+    // when the runner itself holds it (a namespace grant, ledger #1222): that is the runner's
+    // own grant, and the note's "neither the runner nor the ceiling names a member" would be
+    // false of it.
+    let markers = if inv.capability.is_root() {
+        plan::markers(&keep)
+    } else {
+        Vec::new()
+    };
     let note = (!markers.is_empty()).then(|| {
         format!(
             "urn:script:{name} ran holding {} only as a family: a family held is not a grant, \
