@@ -356,7 +356,12 @@ computed per run. A parameter naming a graph is admitted the same way.
 
 A run is a sub-request to the store's graph-scoped doors (`urn:iki:store:graph-select`, `-ask`,
 `-construct`, `-describe`, `-update`), so the store's pre-parse bound, sized stack, tenancy and
-coming time budget apply to every run; this crate parses but never evaluates. Those doors take
+time budget (ikigai-store 0.2.8) apply to every run; this crate parses but never evaluates, so it
+needs no evaluation budget of its own (ledger #1344). A script that would run for hours is
+answered with the store's typed `Timeout` at the budget, and an update that runs out of time
+writes nothing (`tests/sparql_time_budget.rs`). ⚠ The run's capability is narrowed to the
+script's authority, so a runner's `urn:cap:store:budget:<ms>` grant does not follow it into the
+run: every run gets the store's base budget. Those doors take
 ONE set of graphs, whose merge is the default graph and whose members are the named graphs, so
 a script's dataset is every graph it names and its `FROM` clauses are removed from the text the
 store sees. Where that one dataset would change the answer, the query is refused at publish

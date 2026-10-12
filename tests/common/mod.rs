@@ -297,6 +297,19 @@ pub fn sparql_host_with(
     door: ikigai_script::sparql::SparqlDoor,
     ceiling: CeilingPolicy,
 ) -> SparqlHost {
+    sparql_host_on(
+        door,
+        ceiling,
+        ikigai_store::DurableStore::in_memory().expect("a store"),
+    )
+}
+
+/// [`sparql_host_with`] over a store the test built (one with its own time budget, say).
+pub fn sparql_host_on(
+    door: ikigai_script::sparql::SparqlDoor,
+    ceiling: CeilingPolicy,
+    store: ikigai_store::DurableStore,
+) -> SparqlHost {
     let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
     let kernel_cell: Arc<std::sync::OnceLock<std::sync::Weak<Kernel>>> =
         Arc::new(std::sync::OnceLock::new());
@@ -316,7 +329,7 @@ pub fn sparql_host_with(
         .on_change(hook);
     let queries = Arc::new(AtomicUsize::new(0));
     let store = CountingStore {
-        inner: ikigai_store::space(ikigai_store::DurableStore::in_memory().expect("a store")),
+        inner: ikigai_store::space(store),
         queries: Arc::clone(&queries),
     };
     let lisp = EndpointSpace::new().bind(Exact::new("urn:lisp:eval"), ikigai_lisp::eval());
