@@ -103,6 +103,34 @@ family (`capability does not grant urn:cap:script:run:team-*`), so the entry's o
 implicitly, so its publisher must hold it, its host ceiling must allow it, and its runner
 must hold it. See "What the host must supply" for what that means for anonymous runs.
 
+**Store time is declared, and bounded like everything else** (ledger #1384). A run's
+capability is narrowed to the script's authority, so a runner's `urn:cap:store:budget:<ms>`
+grant never follows a script into its run on its own: that would let anyone running a script
+make it long-running without its publisher ever agreeing to it. A script that needs more than
+the store's base says so at publish with `budget=<ms>` (any language, at most 120000), stored
+with the version, so a republish can change it:
+
+- the publish is **refused** (`Denied`, naming both values) unless the publisher then held
+  `urn:cap:store:budget:<m>` with `m` at least the declaration; root holds the store's
+  ceiling, 120 s. What the publisher held is kept with the head (`granted_budget`), as the
+  granted scopes are;
+- a run gets the **least of four**: the declaration, the publisher's value at publish, the
+  host's ceiling (a ceiling file admits store time by listing `urn:cap:store:budget:<ms>`, a
+  number, so 5000 admits a declared 900; one listing none admits none) and the runner's own
+  budget grant, where a runner holding none gets the store's base
+  (`authority::effective_budget`);
+- a script that declares nothing gets the store's base, as before, whatever its runner holds.
+
+A budget is a number, not a token to intersect, so this is the one comparison a run makes
+that attenuation does not, and attenuation still bounds what a run can CARRY: it keeps grants
+by exact name and has no widening form. A SPARQL run is exact anyway, because its one store
+request also says `budget=` and the store's doors read that as a lowering. ⚠ A Lisp script's or
+a plan's store requests are its own, so its run carries `urn:cap:store:budget:<effective>`
+only when its runner can be narrowed to that grant (root, or a runner holding it exactly);
+otherwise it carries the largest budget grant its runner holds below it, and gets less than
+the rule allows, never more (`authority::budget_grant`, pinned in
+`tests/sparql_time_budget.rs`).
+
 ## Drafts are private
 
 A draft (`state=draft`, or `urn:script:eval save=`) is visible only to its **author** until it
@@ -359,9 +387,10 @@ A run is a sub-request to the store's graph-scoped doors (`urn:iki:store:graph-s
 time budget (ikigai-store 0.2.8) apply to every run; this crate parses but never evaluates, so it
 needs no evaluation budget of its own (ledger #1344). A script that would run for hours is
 answered with the store's typed `Timeout` at the budget, and an update that runs out of time
-writes nothing (`tests/sparql_time_budget.rs`). ⚠ The run's capability is narrowed to the
-script's authority, so a runner's `urn:cap:store:budget:<ms>` grant does not follow it into the
-run: every run gets the store's base budget. Those doors take
+writes nothing (`tests/sparql_time_budget.rs`). A runner's `urn:cap:store:budget:<ms>` grant
+never follows a script into its run on its own; a script that needs more than the store's base
+DECLARES it (see "Store time" above), and its run asks the store for exactly what it may have.
+Those doors take
 ONE set of graphs, whose merge is the default graph and whose members are the named graphs, so
 a script's dataset is every graph it names and its `FROM` clauses are removed from the text the
 store sees. Where that one dataset would change the answer, the query is refused at publish

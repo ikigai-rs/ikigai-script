@@ -118,6 +118,10 @@ pub struct Version {
     pub language: Language,
     /// The capability it declares it needs, its language's included.
     pub requires: BTreeSet<String>,
+    /// The store time budget it declares, in milliseconds (`budget=` at publish), or `None`
+    /// for the store's base. Part of the content, so a republish that changes it is a new
+    /// version (see [`crate::authority::effective_budget`] for what a run gets).
+    pub budget: Option<u64>,
     /// The source text.
     pub source: String,
 }
@@ -129,18 +133,23 @@ impl Version {
     /// ikigai-script/1\n
     /// language <language>\n
     /// requires <scope>\n        (one line per scope, sorted)
+    /// budget <milliseconds>\n   (only when it declares one)
     /// \n
     /// <source>
     /// ```
     ///
     /// A scope contains no whitespace and the source comes last, so the framing is
-    /// unambiguous without escaping anything.
+    /// unambiguous without escaping anything. A version declaring no budget frames exactly as
+    /// one did before `budget` existed, so every digest already stored is unchanged.
     pub fn canonical(&self) -> Vec<u8> {
         let mut out = format!("ikigai-script/1\nlanguage {}\n", self.language.as_str());
         for scope in &self.requires {
             out.push_str("requires ");
             out.push_str(scope);
             out.push('\n');
+        }
+        if let Some(millis) = self.budget {
+            out.push_str(&format!("budget {millis}\n"));
         }
         out.push('\n');
         out.push_str(&self.source);
@@ -154,6 +163,7 @@ impl Version {
     /// let v = Version {
     ///     language: Language::Lisp,
     ///     requires: ["urn:cap:lisp".to_string()].into_iter().collect(),
+    ///     budget: None,
     ///     source: "(+ 1 2)".to_string(),
     /// };
     /// let digest = v.digest();
@@ -162,6 +172,9 @@ impl Version {
     /// assert!(digest["sha256:".len()..].bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
     /// // Content-addressed: the same content is the same version.
     /// assert_eq!(digest, v.clone().digest());
+    /// // A declared budget is content too.
+    /// let budgeted = Version { budget: Some(900), ..v.clone() };
+    /// assert_ne!(budgeted.digest(), digest);
     /// ```
     ///
     /// [`canonical`]: Version::canonical
@@ -185,6 +198,7 @@ impl Version {
             version: digest,
             language: self.language,
             requires: self.requires.clone(),
+            budget: self.budget,
             source: self.source.clone(),
         }
     }
@@ -205,6 +219,9 @@ pub struct VersionDocument {
     pub language: Language,
     /// What it declares it needs.
     pub requires: BTreeSet<String>,
+    /// The store time budget it declares, in milliseconds; absent when it declares none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<u64>,
     /// The source text.
     pub source: String,
 }
@@ -246,6 +263,10 @@ pub struct Head {
     pub granted: BTreeSet<String>,
     /// Every exclusion the publisher's capability carried then.
     pub exclusions: BTreeSet<String>,
+    /// The store time budget its publisher held when they published a version declaring one
+    /// ([`crate::authority::budget_at_publish`]), in milliseconds; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted_budget: Option<u64>,
     /// Who published the version the head points at.
     pub publisher: String,
     /// When the head last changed.
@@ -407,11 +428,36 @@ mod tests {
         let a = Version {
             language: Language::Lisp,
             requires: BTreeSet::new(),
+            budget: None,
             source: "(+ 1 2)".to_string(),
         };
         let mut b = a.clone();
         b.requires.insert("urn:cap:lisp".to_string());
         assert_ne!(a.digest(), b.digest());
+    }
+
+    /// A version declaring no budget keeps the digest it had before `budget` existed
+    /// (ledger #1384): the value is pinned from the framing as 0.3.3 wrote it, so every
+    /// version a host already stores is still found by its name.
+    #[test]
+    fn a_version_without_a_budget_keeps_its_digest() {
+        let v = Version {
+            language: Language::Lisp,
+            requires: ["urn:cap:lisp".to_string()].into_iter().collect(),
+            budget: None,
+            source: "(+ 1 2)".to_string(),
+        };
+        assert_eq!(
+            v.digest(),
+            "sha256:ccea630c6cbeb36e3c3a57a9199934e32666e552550dd3c2d321171a493c9bf6"
+        );
+        let budgeted = Version {
+            budget: Some(900),
+            ..v.clone()
+        };
+        assert!(String::from_utf8(budgeted.canonical())
+            .unwrap()
+            .contains("requires urn:cap:lisp\nbudget 900\n\n(+ 1 2)"));
     }
 
     #[test]

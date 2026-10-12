@@ -34,6 +34,7 @@ const JSON: &str = "application/json";
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const XSD_POSITIVE_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#positiveInteger";
 const TURTLE: &str = "text/turtle";
 /// The faces of a read: the source (or a summary) for people, the record for machines.
 const READ_FACES: [&str; 2] = [PLAIN, JSON];
@@ -500,6 +501,8 @@ struct ScriptDocument<'a> {
     version_iri: String,
     language: Language,
     requires: &'a BTreeSet<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget: Option<u64>,
     source: &'a str,
 }
 
@@ -531,6 +534,7 @@ impl Endpoint for ScriptEndpoint {
                         version_iri: name::version_iri(&name, &head.version),
                         language: version.language,
                         requires: &version.requires,
+                        budget: version.budget,
                         source: &version.source,
                     })?
                 } else {
@@ -619,6 +623,20 @@ impl Endpoint for ScriptEndpoint {
                             .optional(),
                     )
                     .input(
+                        ArgSpec::new("budget")
+                            .summary(
+                                "The store time budget the script's runs may have, in \
+                                 milliseconds (at most 120000). Refused unless the publisher \
+                                 holds `urn:cap:store:budget:<m>` with m at least this (root \
+                                 holds 120000). A run gets the least of this, what the \
+                                 publisher held, the host's ceiling and the runner's own \
+                                 budget grant; omitted, every run gets the store's base. Any \
+                                 language.",
+                            )
+                            .class(XSD_POSITIVE_INTEGER)
+                            .optional(),
+                    )
+                    .input(
                         ArgSpec::new("public")
                             .summary(
                                 "Whether holders of `urn:cap:script:run:public` (a host's \
@@ -695,6 +713,9 @@ async fn publish(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Resu
             plan::derive(inv, source, optional(inv, "requires")?).await?
         }
     };
+    let budget = optional(inv, "budget")?
+        .map(authority::parse_budget)
+        .transpose()?;
     let public = optional(inv, "public")?
         .map(|v| parse_bool("public", v))
         .transpose()?
@@ -714,10 +735,16 @@ async fn publish(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Resu
     // ★ No elevation: refused here, before anything is written, if the publisher does not
     // hold every scope the script declares.
     let grant = authority::grant_at_publish(inv.capability, &requires)?;
+    // …and the same for store time (ledger #1384): a declared budget is refused unless the
+    // publisher holds at least that much, and what they held is kept with the head.
+    let granted_budget = budget
+        .map(|millis| authority::budget_at_publish(inv.capability, millis))
+        .transpose()?;
 
     let version = Version {
         language,
         requires,
+        budget,
         source: source.to_string(),
     };
     let digest = version.digest();
@@ -760,6 +787,7 @@ async fn publish(inv: &Invocation<'_>, shared: &SpaceConfig, name: &str) -> Resu
         public,
         granted: grant.granted,
         exclusions: grant.exclusions,
+        granted_budget,
         publisher: principal,
         updated: at,
         history,
@@ -983,6 +1011,12 @@ pub struct Prepared {
     pub granted: BTreeSet<String>,
     /// The publisher's exclusions.
     pub exclusions: BTreeSet<String>,
+    /// The store time budget it declares, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<u64>,
+    /// The store time budget its publisher held when they published it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted_budget: Option<u64>,
     /// Whether it is public.
     pub public: bool,
     /// Its state.
@@ -1047,6 +1081,8 @@ impl Endpoint for CompiledEndpoint {
             requires: version.requires,
             granted: head.granted,
             exclusions: head.exclusions,
+            budget: version.budget,
+            granted_budget: head.granted_budget,
             public: head.public,
             state: head.state,
             sparql: analysis,
@@ -1232,7 +1268,7 @@ async fn prepare_request(
     ceiling: &Ceiling,
     through: Door,
 ) -> Result<Planned> {
-    match prepared.language {
+    let planned = match prepared.language {
         Language::Lisp => {
             let data = optional(
                 inv,
@@ -1241,15 +1277,57 @@ async fn prepare_request(
                     Door::Runs => "content",
                 },
             )?;
-            Ok(Planned {
+            Planned {
                 request: lisp_request(&prepared.program, data)?,
                 keep,
                 note: None,
-            })
+            }
         }
-        Language::Sparql => plan_sparql(inv, shared, prepared, keep, ceiling, through).await,
-        Language::Plan => plan_eval_request(inv, prepared, keep, ceiling, through),
-    }
+        Language::Sparql => plan_sparql(inv, shared, prepared, keep, ceiling, through).await?,
+        Language::Plan => plan_eval_request(inv, prepared, keep, ceiling, through)?,
+    };
+    Ok(with_budget(inv, prepared, ceiling, planned))
+}
+
+/// Give a run the store time its script declared, bounded like the rest of its authority
+/// (ledger #1384): never above what its publisher held at publish, the host's ceiling or the
+/// runner's own budget grant ([`authority::effective_budget`]). A script declaring nothing
+/// carries no budget grant, whatever its runner holds, so its runs get the store's base.
+///
+/// What the run can CARRY is bounded by attenuation, which keeps grants by exact name:
+/// - a SPARQL run's one store request also says `budget=<bound>`, which the store's doors
+///   read as a lowering, so the run carries a grant at or above the bound
+///   ([`authority::budget_grant_lowered`]) and is answered at exactly the least of the four;
+/// - a Lisp script's or a plan's store requests are its own, and nothing on their way can
+///   lower them, so the run carries `urn:cap:store:budget:<effective>` when its runner can
+///   be narrowed to that grant (root, or a runner holding it exactly), and otherwise the
+///   largest budget grant its runner holds below it: less, never more
+///   ([`authority::budget_grant`]).
+fn with_budget(
+    inv: &Invocation<'_>,
+    prepared: &Prepared,
+    ceiling: &Ceiling,
+    mut planned: Planned,
+) -> Planned {
+    let Some(bound) = authority::budget_bound(prepared.budget, prepared.granted_budget, ceiling)
+    else {
+        return planned;
+    };
+    let runner = inv.capability;
+    let grant = match prepared.language {
+        Language::Sparql => {
+            planned.request = planned
+                .request
+                .with_arg("budget", inline(&bound.to_string()));
+            authority::budget_grant_lowered(runner, bound)
+        }
+        Language::Lisp | Language::Plan => {
+            authority::effective_budget(prepared.budget, prepared.granted_budget, ceiling, runner)
+                .and_then(|millis| authority::budget_grant(runner, millis))
+        }
+    };
+    planned.keep.extend(grant);
+    planned
 }
 
 /// A plan run: refuse a write through the read door, take the plan's parameters, turn a
