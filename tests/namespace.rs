@@ -274,9 +274,28 @@ fn a_querys_own_contract_declares_its_top_level_namespace() {
         ))
         .unwrap()
     };
-    let text = meta("team-a-titles").to_string();
-    assert!(text.contains("urn:cap:script:run:team-*"), "{text}");
-    assert!(!text.contains("urn:cap:script:run:team-a-titles"), "{text}");
-    let text = meta("titles").to_string();
-    assert!(text.contains("urn:cap:script:run:titles"), "{text}");
+    // What the floor checks is the action's `requires` (the summary names the exact grant
+    // too, saying why the floor is the family: ledger #1261).
+    let requires = |name: &str| -> Vec<String> {
+        meta(name)["actions"][0]["requires"]
+            .as_array()
+            .expect("an action's requires")
+            .iter()
+            .map(|s| s.as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    let team = requires("team-a-titles");
+    assert!(
+        team.contains(&"urn:cap:script:run:team-*".to_string()),
+        "{team:?}"
+    );
+    assert!(
+        !team.contains(&"urn:cap:script:run:team-a-titles".to_string()),
+        "{team:?}"
+    );
+    let titles = requires("titles");
+    assert!(
+        titles.contains(&"urn:cap:script:run:titles".to_string()),
+        "{titles:?}"
+    );
 }

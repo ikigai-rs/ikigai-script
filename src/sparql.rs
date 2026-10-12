@@ -73,7 +73,8 @@
 //!   [`SparqlDoor::default_graphs`]): a `FROM NAMED` or `GRAPH <iri>` graph outside it would
 //!   join the merge its bare patterns read, and a `GRAPH ?g` would pull the caller's whole
 //!   readable union into it;
-//! - a query that names no graph at all and has no variable `GRAPH` reads nothing.
+//! - a query that names no graph at all and has no variable `GRAPH` reads nothing, and the
+//!   store's scoped doors refuse an empty dataset, so it could not run (ledger #1278).
 //!
 //! A `GRAPH ?g` whose graph the text does not fix runs over **the caller's readable union**
 //! (and never more): the graphs the run may read, computed per run.
@@ -897,9 +898,18 @@ fn query_shape(query: &Query, door: &SparqlDoor) -> Result<Shape> {
         all.extend(from_named);
         all.extend(scan.graphs.iter().cloned());
         if all.is_empty() && !any_graph {
+            // ★ Not "needs nothing, so runs for anyone" (ledger #1278), though it would be
+            // true of its authority: a script runs through the store's graph-scoped doors,
+            // and they refuse an empty dataset rather than evaluate one (ikigai-store
+            // `src/scope.rs`), because a query that reads one answers nothing, plausibly and
+            // wrongly. This crate has no evaluator of its own to run it on, so it is refused
+            // here, saying so, rather than published to fail at every run.
             return Err(invalid(
-                "this query names no graph (no FROM, FROM NAMED or GRAPH), so it reads \
-                 nothing; name the graphs it reads",
+                "this query reads no graph (no FROM, FROM NAMED or GRAPH, and no pattern \
+                 outside one), so its authority would be nothing, but a script runs through \
+                 the store's graph-scoped doors, which refuse an empty dataset rather than \
+                 evaluate one. Name a graph its runners may read with FROM <…>; a query with \
+                 no pattern answers the same whatever that graph holds",
             ));
         }
         all

@@ -95,7 +95,9 @@ and a description cannot depend on who asks. So a name in a namespace declares i
 namespace as its run gate (`team-a-report` declares `urn:cap:script:run:team-*`,
 `authority::run_floor`) and the exact rule is checked inside: the entry is offered to a holder
 of another grant in the same top-level namespace, who is refused when they call it. A name
-with no `-` keeps its exact gate.
+with no `-` keeps its exact gate. The floor's refusal is the kernel's and names only the
+family (`capability does not grant urn:cap:script:run:team-*`), so the entry's own contract
+(what `Meta` answers) says what satisfies it and why.
 
 **Evaluating code is itself authority.** Every Lisp script declares `urn:cap:lisp`
 implicitly, so its publisher must hold it, its host ceiling must allow it, and its runner
@@ -128,6 +130,12 @@ what a grant reaches.
   is answered to anyone who can reach the door, and the script's own contract is made of its
   text (its parameters and leading comment), so a draft wears the generic contract until it is
   published.
+- **A run of a draft is refused for its state**, whatever its language: `Conflict`, "… is a
+  draft; publish it to run it", to its author (and root), before any run grant is checked, and
+  `NotFound` to anyone else. The generic contract declares no language grant: only a PUBLISHED
+  Lisp script's door adds `urn:cap:lisp`, so the author of a SPARQL draft is no longer told her
+  capability does not grant Lisp (0.3.3, ledger #1261). The hint names a door that takes the
+  language: `urn:script:eval` for Lisp, `urn:plan:eval` for a plan, none for SPARQL.
 - ⚠ **A capability that names no principal has no authors**: a draft written under one is
   recorded `UNSTAMPED`, and `UNSTAMPED` and `ANONYMOUS` name many callers at once, so a draft
   written under either is root's alone, and a refusal to a caller whose capability names no
@@ -355,7 +363,11 @@ store sees. Where that one dataset would change the answer, the query is refused
 instead of answered differently: a query reading the default graph (a bare pattern, or a
 DESCRIBE) must name its whole dataset with `FROM`, and may not also read a `GRAPH ?g`. An update
 writes exactly one named graph and reads no other; `LOAD`, `SERVICE`, `DROP ALL` and a write to
-the default graph are refused. `SERVICE` is refused in a query too (anywhere, `FILTER EXISTS` and
+the default graph are refused. A query that reads NO graph (`SELECT ("hi" AS ?x) {}`) is refused
+too, saying why: its authority would be nothing, but the store's doors refuse an empty dataset
+rather than evaluate one, and this crate has no evaluator to run it on. Name a graph its runners
+may read with `FROM <…>`; a query with no pattern answers the same whatever that graph holds
+(ledger #1278). `SERVICE` is refused in a query too (anywhere, `FILTER EXISTS` and
 a variable service name included), at publish and again at every run, so no script reaches the
 network even in a host whose graph compiles in oxigraph's HTTP client (`ikigai-cli` does, through
 rudof). `tests/sparql_service_egress.rs` proves it with a local stub under the test-only feature
