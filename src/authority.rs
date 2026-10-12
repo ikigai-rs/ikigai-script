@@ -49,6 +49,15 @@
 //! grant and handed to `attenuate`, which keeps a requested exclusion (it only narrows).
 //! The ceiling's exclusions travel the same way.
 //!
+//! **Store time is declared and bounded the same way** (ledger #1384). A runner's
+//! `urn:cap:store:budget:<ms>` grant never follows a script into its run on its own: a
+//! script declares a budget at publish (`budget=`), refused unless its publisher then held at
+//! least that much ([`budget_at_publish`]), and a run gets the least of the declaration, the
+//! publisher's value, the host's ceiling and the runner's own grant ([`effective_budget`]).
+//! A budget is a number, not a token to intersect, so that is the one comparison here that
+//! attenuation does not make, and attenuation still bounds what a run can carry
+//! ([`budget_grant`], [`budget_grant_lowered`]).
+//!
 //! ```
 //! use ikigai_core::Capability;
 //! use ikigai_script::authority::{effective, Ceiling};
@@ -626,6 +635,236 @@ pub fn effective(
     keep
 }
 
+// ---------------------------------------------------------------------------------------
+// A declared store time budget (ledger #1384)
+// ---------------------------------------------------------------------------------------
+
+/// Where a store time-budget grant starts: `urn:cap:store:budget:<milliseconds>`, the grant
+/// `ikigai-store` reads to lift a caller above its base budget (spelled here rather than
+/// imported: the library does not link the store).
+pub const BUDGET_PREFIX: &str = "urn:cap:store:budget:";
+
+/// The most a script may declare, and the budget root is taken to hold: **120 s**, the
+/// store's default ceiling (`ikigai_store::budget::DEFAULT_CEILING`). The store clamps every
+/// grant to its own ceiling as well, so a host that lowers its store's ceiling still bounds
+/// every run; one that RAISES it does not raise this.
+pub const MAX_BUDGET_MS: u64 = 120_000;
+
+/// The store budget grant for `millis` milliseconds.
+///
+/// ```
+/// assert_eq!(ikigai_script::authority::cap_budget(900), "urn:cap:store:budget:900");
+/// ```
+pub fn cap_budget(millis: u64) -> String {
+    format!("{BUDGET_PREFIX}{millis}")
+}
+
+/// The budget grants `capability` holds, as numbers (each held exactly, never an exclusion).
+fn budget_grants(capability: &Capability) -> BTreeSet<u64> {
+    capability
+        .scopes()
+        .map(|held| {
+            held.iter()
+                .filter(|scope| capability.allows(scope))
+                .filter_map(|scope| scope.strip_prefix(BUDGET_PREFIX)?.parse::<u64>().ok())
+                .filter(|millis| *millis > 0)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The most store time `capability` holds: [`MAX_BUDGET_MS`] for root, otherwise its largest
+/// `urn:cap:store:budget:<ms>` grant, or `None` when it holds none (the store's base).
+///
+/// ```
+/// use ikigai_core::Capability;
+/// use ikigai_script::authority::{held_budget, MAX_BUDGET_MS};
+/// let two = Capability::scoped(["urn:cap:store:budget:900", "urn:cap:store:budget:5000"]);
+/// assert_eq!(held_budget(&two), Some(5000));
+/// assert_eq!(held_budget(&Capability::scoped(["urn:cap:lisp"])), None);
+/// assert_eq!(held_budget(&Capability::root()), Some(MAX_BUDGET_MS));
+/// ```
+pub fn held_budget(capability: &Capability) -> Option<u64> {
+    if capability.is_root() {
+        return Some(MAX_BUDGET_MS);
+    }
+    budget_grants(capability).last().copied()
+}
+
+/// Parse `budget=` at publish: a positive whole number of milliseconds, at most
+/// [`MAX_BUDGET_MS`].
+pub fn parse_budget(text: &str) -> Result<u64> {
+    match text.trim().parse::<u64>() {
+        Ok(millis) if (1..=MAX_BUDGET_MS).contains(&millis) => Ok(millis),
+        _ => Err(Error::InvalidArgument {
+            name: "budget".to_string(),
+            detail: format!(
+                "`{text}` is not a store time budget: give a positive whole number of \
+                 milliseconds, at most {MAX_BUDGET_MS} (the store's ceiling)"
+            ),
+        }),
+    }
+}
+
+/// Take the publisher's store budget for a script declaring `declared` milliseconds, or
+/// refuse with a typed `Denied` naming both values. **No elevation**, the same rule as
+/// [`grant_at_publish`]: a script never asks for more store time than its publisher held
+/// when they published it. The value answered is what the publisher held, stored with the
+/// head and intersected at every run, as the granted scopes are.
+///
+/// ```
+/// use ikigai_core::Capability;
+/// use ikigai_script::authority::{budget_at_publish, MAX_BUDGET_MS};
+/// let publisher = Capability::scoped(["urn:cap:store:budget:2000"]);
+/// assert_eq!(budget_at_publish(&publisher, 900).unwrap(), 2000);
+/// let refused = budget_at_publish(&publisher, 5000).unwrap_err().to_string();
+/// assert!(refused.contains("5000") && refused.contains("2000"), "{refused}");
+/// assert!(budget_at_publish(&Capability::scoped(["urn:cap:lisp"]), 900).is_err());
+/// assert_eq!(budget_at_publish(&Capability::root(), 900).unwrap(), MAX_BUDGET_MS);
+/// ```
+pub fn budget_at_publish(publisher: &Capability, declared: u64) -> Result<u64> {
+    match held_budget(publisher) {
+        Some(held) if held >= declared => Ok(held),
+        held => Err(Error::Denied(format!(
+            "a script cannot be given more store time than its publisher holds: it declares \
+             budget={declared} ms, and this capability holds {} — declare less, or publish \
+             under a capability holding `{}`",
+            match held {
+                Some(held) => format!("`{}` ({held} ms) at most", cap_budget(held)),
+                None => "no store budget grant (only the store's base)".to_string(),
+            },
+            cap_budget(declared)
+        ))),
+    }
+}
+
+impl Ceiling {
+    /// The most store time this ceiling lets a script's runs carry: [`MAX_BUDGET_MS`] when
+    /// it is [`Ceiling::Unbounded`] or holds a family covering the budget grants
+    /// (`urn:cap:store:budget:*`, `urn:cap:store:*`, …); otherwise its largest exact
+    /// `urn:cap:store:budget:<ms>`; `None` when it names none, and then a run carries no
+    /// budget grant and gets the store's base. A budget is a number, so a ceiling of 5000
+    /// admits a declared 900.
+    ///
+    /// ```
+    /// use ikigai_script::authority::{Ceiling, MAX_BUDGET_MS};
+    /// assert_eq!(Ceiling::Unbounded.budget(), Some(MAX_BUDGET_MS));
+    /// assert_eq!(Ceiling::scoped(["urn:cap:store:budget:5000"]).budget(), Some(5000));
+    /// assert_eq!(Ceiling::scoped(["urn:cap:store:budget:*"]).budget(), Some(MAX_BUDGET_MS));
+    /// assert_eq!(Ceiling::scoped(["urn:cap:lisp"]).budget(), None);
+    /// ```
+    pub fn budget(&self) -> Option<u64> {
+        match self {
+            Ceiling::Unbounded => Some(MAX_BUDGET_MS),
+            Ceiling::Scopes(held) => {
+                let family = held.iter().any(|h| {
+                    h.strip_suffix('*')
+                        .is_some_and(|prefix| BUDGET_PREFIX.starts_with(prefix))
+                });
+                if family {
+                    return Some(MAX_BUDGET_MS);
+                }
+                held.iter()
+                    .filter_map(|h| h.strip_prefix(BUDGET_PREFIX)?.parse::<u64>().ok())
+                    .filter(|millis| *millis > 0)
+                    .max()
+            }
+        }
+    }
+}
+
+/// The script's side of a run's budget: the least of what the version declares, what its
+/// publisher held at publish and what the host's ceiling admits. `None` when the script
+/// declares nothing, or any of the three withholds it: the run then gets the store's base.
+pub fn budget_bound(declared: Option<u64>, granted: Option<u64>, ceiling: &Ceiling) -> Option<u64> {
+    Some(declared?.min(granted?).min(ceiling.budget()?))
+}
+
+/// A run's store time budget: the least of the declared value, the publisher's value at
+/// publish, the host's ceiling ([`budget_bound`]) and the RUNNER's own budget
+/// ([`held_budget`]). `None` means the store's base: no declaration, or a runner holding no
+/// budget grant (a script never lifts its runner above the base).
+///
+/// A budget grant is a number, not a token to intersect, so this is the one comparison the
+/// run makes that attenuation does not. What a run can then CARRY is bounded by attenuation
+/// as well: see [`budget_grant`] and [`budget_grant_lowered`].
+///
+/// ```
+/// use ikigai_core::Capability;
+/// use ikigai_script::authority::{effective_budget, Ceiling};
+/// let runner = Capability::scoped(["urn:cap:store:budget:900"]);
+/// let host = Ceiling::Unbounded;
+/// assert_eq!(effective_budget(Some(900), Some(2000), &host, &runner), Some(900));
+/// assert_eq!(effective_budget(Some(5000), Some(5000), &host, &runner), Some(900));
+/// assert_eq!(effective_budget(None, None, &host, &runner), None);
+/// ```
+pub fn effective_budget(
+    declared: Option<u64>,
+    granted: Option<u64>,
+    ceiling: &Ceiling,
+    runner: &Capability,
+) -> Option<u64> {
+    Some(budget_bound(declared, granted, ceiling)?.min(held_budget(runner)?))
+}
+
+/// The budget grant a run carries to reach `millis`, when nothing on its way to the store
+/// can lower it (a Lisp script's or a plan's own sub-requests).
+///
+/// A run's capability is the runner's [`Capability::attenuate`]d, which keeps grants by EXACT
+/// name and has no widening form, so it can carry only a grant its runner holds: root
+/// carries `urn:cap:store:budget:<millis>` exactly, and so does a runner holding exactly
+/// that grant. Any other runner carries the largest budget grant it holds BELOW `millis`
+/// (never one above it), or none, and its run gets less than `millis`, never more.
+///
+/// ```
+/// use ikigai_core::Capability;
+/// use ikigai_script::authority::budget_grant;
+/// let runner = Capability::scoped(["urn:cap:store:budget:500", "urn:cap:store:budget:60000"]);
+/// assert_eq!(budget_grant(&runner, 60000).as_deref(), Some("urn:cap:store:budget:60000"));
+/// assert_eq!(budget_grant(&runner, 900).as_deref(), Some("urn:cap:store:budget:500"));
+/// assert_eq!(budget_grant(&runner, 400), None);
+/// assert_eq!(budget_grant(&Capability::root(), 900).as_deref(), Some("urn:cap:store:budget:900"));
+/// ```
+pub fn budget_grant(runner: &Capability, millis: u64) -> Option<String> {
+    if runner.is_root() {
+        return Some(cap_budget(millis));
+    }
+    budget_grants(runner)
+        .range(..=millis)
+        .next_back()
+        .map(|held| cap_budget(*held))
+}
+
+/// The budget grant a run carries when its one store request also carries `budget=<millis>`
+/// (a SPARQL script's run), which the store's doors read as a LOWERING: the request is
+/// answered at the least of `budget=` and what its capability gets.
+///
+/// So the run may carry a grant above `millis` without its request getting more: root
+/// carries `millis` exactly, any other runner the smallest budget grant it holds at or
+/// above `millis`, or failing that its largest. The store then answers at
+/// `min(millis, max(base, that grant))`, which is exactly [`effective_budget`] with the
+/// store's base standing in for a runner holding none.
+///
+/// ```
+/// use ikigai_core::Capability;
+/// use ikigai_script::authority::budget_grant_lowered;
+/// let runner = Capability::scoped(["urn:cap:store:budget:500", "urn:cap:store:budget:60000"]);
+/// assert_eq!(budget_grant_lowered(&runner, 900).as_deref(), Some("urn:cap:store:budget:60000"));
+/// assert_eq!(budget_grant_lowered(&runner, 400).as_deref(), Some("urn:cap:store:budget:500"));
+/// assert_eq!(budget_grant_lowered(&runner, 90000).as_deref(), Some("urn:cap:store:budget:60000"));
+/// assert_eq!(budget_grant_lowered(&Capability::scoped(["urn:cap:lisp"]), 900), None);
+/// ```
+pub fn budget_grant_lowered(runner: &Capability, millis: u64) -> Option<String> {
+    if runner.is_root() {
+        return Some(cap_budget(millis));
+    }
+    let held = budget_grants(runner);
+    held.range(millis..)
+        .next()
+        .or_else(|| held.last())
+        .map(|held| cap_budget(*held))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,6 +951,118 @@ mod tests {
             parse_requires(" urn:cap:a\n urn:cap:b urn:cap:a ").unwrap(),
             set(&["urn:cap:a", "urn:cap:b"])
         );
+    }
+
+    /// The min rule (ledger #1384), across every case the decision names. `None` is the
+    /// store's base.
+    #[test]
+    fn a_runs_budget_is_the_least_of_four() {
+        let runner = |ms: u64| Capability::scoped([cap_budget(ms)]);
+        let none = Capability::scoped(["urn:cap:script:run:x"]);
+        let root = Capability::root();
+        let open = Ceiling::Unbounded;
+        let host = |ms: u64| Ceiling::scoped([cap_budget(ms), "urn:cap:lisp".to_string()]);
+        let silent = Ceiling::scoped(["urn:cap:lisp"]);
+        let check = |what: &str,
+                     declared: Option<u64>,
+                     granted: Option<u64>,
+                     ceiling: &Ceiling,
+                     runner: &Capability,
+                     want: Option<u64>| {
+            assert_eq!(
+                effective_budget(declared, granted, ceiling, runner),
+                want,
+                "{what}"
+            );
+        };
+        check("no declaration", None, None, &open, &runner(900), None);
+        check(
+            "no declaration, root runner",
+            None,
+            None,
+            &open,
+            &root,
+            None,
+        );
+        check(
+            "declared, held",
+            Some(900),
+            Some(900),
+            &open,
+            &runner(900),
+            Some(900),
+        );
+        check(
+            "above the runner",
+            Some(900),
+            Some(900),
+            &open,
+            &runner(400),
+            Some(400),
+        );
+        check(
+            "runner holds no grant",
+            Some(900),
+            Some(900),
+            &open,
+            &none,
+            None,
+        );
+        check(
+            "above the publisher",
+            Some(900),
+            Some(600),
+            &open,
+            &runner(900),
+            Some(600),
+        );
+        check(
+            "above the ceiling",
+            Some(900),
+            Some(900),
+            &host(700),
+            &runner(900),
+            Some(700),
+        );
+        check(
+            "a ceiling naming no budget",
+            Some(900),
+            Some(900),
+            &silent,
+            &runner(900),
+            None,
+        );
+        check("root runner", Some(900), Some(900), &open, &root, Some(900));
+        check(
+            "root publisher",
+            Some(900),
+            Some(MAX_BUDGET_MS),
+            &open,
+            &runner(5000),
+            Some(900),
+        );
+        check(
+            "all root, ceiling lower",
+            Some(90_000),
+            Some(MAX_BUDGET_MS),
+            &host(30_000),
+            &root,
+            Some(30_000),
+        );
+        // A root publisher holds the store's ceiling, so a declaration up to it is admitted.
+        assert_eq!(
+            budget_at_publish(&root, MAX_BUDGET_MS).unwrap(),
+            MAX_BUDGET_MS
+        );
+        assert!(parse_budget(&(MAX_BUDGET_MS + 1).to_string()).is_err());
+        assert!(parse_budget("0").is_err());
+        assert!(parse_budget("1s").is_err());
+    }
+
+    #[test]
+    fn an_exclusion_is_never_read_as_a_budget() {
+        let odd = Capability::scoped(["urn:cap:store:budget:-900", "urn:cap:store:budget:0"]);
+        assert_eq!(held_budget(&odd), None);
     }
 
     #[test]

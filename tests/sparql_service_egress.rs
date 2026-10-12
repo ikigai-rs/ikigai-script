@@ -283,6 +283,7 @@ fn a_fetching_version_that_skipped_publish_is_refused_at_run() {
         let tampered = Version {
             language: Language::Sparql,
             requires: published.requires,
+            budget: published.budget,
             source: text,
         };
         host.backend.put_version(&name, &tampered).unwrap();

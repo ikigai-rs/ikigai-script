@@ -214,6 +214,10 @@ struct VersionFile {
     schema: u32,
     language: Language,
     requires: std::collections::BTreeSet<String>,
+    /// Absent when the version declares no budget, so a file written before `budget` existed
+    /// reads as it did, and one that declares none is written as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    budget: Option<u64>,
     source: String,
 }
 
@@ -330,6 +334,7 @@ impl Backend for DirBackend {
                 schema: SCHEMA,
                 language: version.language,
                 requires: version.requires.clone(),
+                budget: version.budget,
                 source: version.source.clone(),
             },
         )
@@ -343,6 +348,7 @@ impl Backend for DirBackend {
         let version = Version {
             language: file.language,
             requires: file.requires,
+            budget: file.budget,
             source: file.source,
         };
         if version.digest() != digest.to_ascii_lowercase() {
