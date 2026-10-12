@@ -56,9 +56,10 @@ pub struct SpaceConfig {
     ceiling: CeilingPolicy,
     sparql: Option<SparqlDoor>,
     on_change: Option<ChangeHook>,
-    /// Each published SPARQL script's own endpoints (its contract), built once per head and
-    /// dropped by every publish or retire through this crate. `None`: the template's.
-    described: Arc<Mutex<HashMap<String, Option<PerScript>>>>,
+    /// Each script's contract (a published SPARQL script's or plan's own endpoints, the
+    /// template's, or the one a script that is not published wears), built once per head
+    /// and dropped by every write or retire through this crate.
+    described: Arc<Mutex<HashMap<String, Contract>>>,
 }
 
 /// What a host runs when a script's head changes through this crate: see
@@ -165,7 +166,11 @@ pub fn space(config: SpaceConfig) -> ScriptSpace {
                 shared: Arc::clone(&shared),
             },
         );
-    ScriptSpace { inner, shared }
+    ScriptSpace {
+        inner,
+        lisp: LispDoors::new(&shared),
+        shared,
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1111,31 +1116,50 @@ async fn prepare_run(
     let public = prepared.public && prepared.state == State::Published;
     let may_run =
         may(inv, Act::Run, name) || (public && may_public(inv, Act::Run, CAP_RUN_PUBLIC, name));
-    if !may_run {
-        return Err(Error::Denied(format!(
-            "running urn:script:{name} needs `{}` or a namespace grant covering it{}. \
-             {GRANT_FORMS}, and an exclusion (`…:-{{name}}`) takes one back out",
+    let run_grant = || {
+        format!(
+            "`{}` or a namespace grant covering it{}",
             cap_run(name),
             if prepared.public {
                 format!(" (or `{CAP_RUN_PUBLIC}`, since it is public)")
             } else {
                 " — it is not public".to_string()
             }
-        )));
-    }
+        )
+    };
+    // ★ The STATE first (ledger #1261): whoever reached the compiled form may read or run
+    // this script and can see its head version (a draft's author, or root), so telling them
+    // it is a draft or retired discloses nothing, and it is the reason the run cannot happen
+    // whatever grant they hold. The run grant it will also need is said after it.
+    let also = || {
+        if may_run {
+            String::new()
+        } else {
+            format!("; running it will also need {}", run_grant())
+        }
+    };
     match prepared.state {
         State::Published => {}
         State::Draft => {
             return Err(Error::Conflict(format!(
-                "urn:script:{name} is a draft; publish it (`state=published`) to run it, or \
-                 try the code at urn:script:eval"
+                "urn:script:{name} is a draft; publish it (`state=published`) to run it{}{}",
+                ad_hoc(prepared.language),
+                also()
             )))
         }
         State::Retired => {
             return Err(Error::Conflict(format!(
-                "urn:script:{name} is retired; publish it again to run it"
+                "urn:script:{name} is retired; publish it again to run it{}",
+                also()
             )))
         }
+    }
+    if !may_run {
+        return Err(Error::Denied(format!(
+            "running urn:script:{name} needs {}. {GRANT_FORMS}, and an exclusion \
+             (`…:-{{name}}`) takes one back out",
+            run_grant()
+        )));
     }
     let ceiling = (shared.ceiling)(name);
     let keep = authority::effective(
@@ -1145,6 +1169,19 @@ async fn prepare_run(
         &ceiling,
     );
     Ok((prepared, keep, ceiling))
+}
+
+/// Where a draft's code can run without publishing it, said only for a language that door
+/// takes: `urn:script:eval` runs Lisp and refuses SPARQL and plans.
+fn ad_hoc(language: Language) -> String {
+    match language {
+        Language::Lisp => format!(", or try the code at {EVAL_IRI}"),
+        Language::Plan => format!(
+            ", or run the plan itself at {} (`in` = the plan), under your own capability",
+            plan::EVAL
+        ),
+        Language::Sparql => String::new(),
+    }
 }
 
 /// The Lisp evaluator sub-request: `in` is the program, `data` what it reads with `(input)`.
@@ -1695,8 +1732,11 @@ impl Endpoint for ResultEndpoint {
                  the host allows it — never more. Cacheable exactly as far as the script's \
                  own sub-requests are (a Lisp program opts in with `(cacheable …)`), and \
                  recomputed when the script is republished. No run record: a cached answer \
-                 runs nothing; record a run with `…:runs`. A published SPARQL script is \
-                 its own entry, with its parameters as arguments.",
+                 runs nothing; record a run with `…:runs`. A published SPARQL script or \
+                 plan is its own entry, with its parameters as arguments; a published Lisp \
+                 script's door also requires `urn:cap:lisp`. A run of a script that is not \
+                 published is refused for its state (to a caller who may see it) or as \
+                 absent.",
             )
             .verb(Verb::Meta)
             .action(
@@ -1705,8 +1745,7 @@ impl Endpoint for ResultEndpoint {
                     .input(name_arg())
                     .input(data_arg("data", DATA_SUMMARY))
                     .output(PLAIN)
-                    .requires(CAP_RUN)
-                    .requires(CAP_LISP),
+                    .requires(CAP_RUN),
             )
     }
 }
@@ -1787,8 +1826,10 @@ impl Endpoint for RunsEndpoint {
                 "Run the script for its EFFECTS and record the run: who (the principal \
                  the capability names), which version, under exactly what capability, when, and the \
                  outcome. Answers the run's IRI; a run that fails is recorded too, and its \
-                 error names the record. A published SPARQL script is its own entry, with \
-                 its parameters as arguments.",
+                 error names the record. A published SPARQL script or plan is its own \
+                 entry, with its parameters as arguments; a published Lisp script's door also \
+                 requires `urn:cap:lisp`. A script that is not published is refused before \
+                 any run is recorded.",
             )
             .verb(Verb::Meta)
             .action(
@@ -1797,8 +1838,7 @@ impl Endpoint for RunsEndpoint {
                     .input(name_arg())
                     .input(data_arg("content", DATA_SUMMARY))
                     .output(PLAIN)
-                    .requires(CAP_RUN)
-                    .requires(CAP_LISP),
+                    .requires(CAP_RUN),
             )
     }
 }
@@ -1822,15 +1862,87 @@ struct PerScript {
     listed: bool,
 }
 
+/// Which contract a script's `…:result` and `…:runs` answer under.
+#[derive(Clone)]
+enum Contract {
+    /// A published SPARQL script's or a plan's own (and a draft or a retired script whose
+    /// head version was published once): its parameters, and the scopes its text derives.
+    Own(PerScript),
+    /// [`LispDoors`]': a published Lisp script, whose run needs `urn:cap:lisp`.
+    Lisp,
+    /// The template's, which asks no language grant: a script that is not published (a
+    /// draft, a retired Lisp script) and a name nobody wrote.
+    Template,
+}
+
+/// The doors a PUBLISHED Lisp script runs through: the template's, declaring the language
+/// grant its evaluator needs (`urn:cap:lisp`) beside the template's own (ledger #1261).
+///
+/// ★ **Why the template does not declare it.** The kernel's floor checks a contract before
+/// the endpoint is entered, and the template is also the contract of every draft (whatever
+/// its language) and of every name nobody wrote. Declared there, a run of a SPARQL draft was
+/// refused because its author's capability did not grant Lisp, and only root or a Lisp
+/// holder ever heard the real reason, that it is a draft. Without it, the run says that to
+/// a caller who may see the draft, and that nothing is there to anyone else.
+///
+/// ⚠ **The template stays ONE contract for all of those, on purpose.** Meta is answered from
+/// the description to anyone who can reach the door, so a draft's contract must say nothing
+/// a name nobody wrote does not (ledger #952): not its language, not its parameters, not that
+/// it exists. What it does tell apart is a PUBLISHED Lisp script, which wears this one; that a
+/// script is published is already public for SPARQL and plans, each its own catalog entry.
+/// And the kernel describes the template's catalog entry by resolving it at a probe name
+/// (which nobody wrote), so this one can never be the template's: the template's entry
+/// would describe nothing, and the Lisp door would leave the catalog and the manifold.
+///
+/// Nothing runs under the template but a refusal: a published script never wears it, and a
+/// script published between resolution and the run is run with the caller's own capability
+/// attenuated to what it requires, so a Lisp script's evaluator still refuses a runner
+/// without `urn:cap:lisp`.
+#[derive(Clone)]
+struct LispDoors {
+    result: Arc<dyn Endpoint>,
+    runs: Arc<dyn Endpoint>,
+}
+
+impl LispDoors {
+    /// Built once per space: the kernel memoizes floors by the endpoint's allocation.
+    fn new(shared: &Arc<SpaceConfig>) -> LispDoors {
+        let door = |inner: Arc<dyn Endpoint>| -> Arc<dyn Endpoint> {
+            let description = needs_lisp(inner.describe());
+            Arc::new(Described {
+                id: description.id.clone(),
+                description,
+                inner,
+            })
+        };
+        LispDoors {
+            result: door(Arc::new(ResultEndpoint {
+                shared: Arc::clone(shared),
+            })),
+            runs: door(Arc::new(RunsEndpoint {
+                shared: Arc::clone(shared),
+            })),
+        }
+    }
+}
+
+/// `template`, with the language grant a Lisp script's run needs on every action. The id is
+/// the template's: it is the same door, with one more scope declared.
+fn needs_lisp(mut template: Description) -> Description {
+    for action in &mut template.actions {
+        action.requires.push(CAP_LISP.to_string());
+    }
+    template
+}
+
 /// The template's endpoint, behind one script's contract.
 ///
 /// ★ **Why a script is its own entry.** A description is the contract the engine routes
 /// arguments by, selection matches on, MCP projects and the Emacs aliases are generated
 /// from, and the kernel answers it per ENDPOINT, never per IRI. A query's or a plan's
-/// parameters are real arguments only if they are in a description, so each gets one. And
-/// the template's `requires` is Lisp's (`urn:cap:lisp`): a query or a plan behind it would be
-/// refused at the floor for a language grant it never needs, so a plan with no parameters
-/// still gets its own.
+/// parameters are real arguments only if they are in a description, so each gets one, and
+/// so does a plan with no parameters: its contract declares what its steps derive, and the
+/// template declares none of that.
 /// It is built once per head (the kernel memoizes floors by this allocation) and dropped
 /// by the next publish or retire.
 struct Described {
@@ -1858,15 +1970,18 @@ impl Endpoint for Described {
 /// script and plan as its own `…:result` and `…:runs` entry, carrying its parameters.
 pub struct ScriptSpace {
     inner: EndpointSpace,
+    lisp: LispDoors,
     shared: Arc<SpaceConfig>,
 }
 
 impl ScriptSpace {
-    /// The script's own endpoints, when it is a SPARQL script this host can run or a plan.
+    /// The contract the script's run doors answer under: its own when it is a SPARQL
+    /// script this host can run or a plan, [`LispDoors`]' when it is a published Lisp
+    /// script, and the template's otherwise.
     ///
-    /// A Lisp script has none (the template's contract IS its contract), but finding that
-    /// out costs one head and version read per name, remembered until the next publish.
-    fn per_script(&self, name: &str) -> Option<PerScript> {
+    /// Finding that out costs one head and version read per name, remembered until the next
+    /// write.
+    fn contract(&self, name: &str) -> Contract {
         let shared = &self.shared;
         if let Some(known) = shared
             .described
@@ -1876,37 +1991,44 @@ impl ScriptSpace {
         {
             return known.clone();
         }
-        let built = self.build(name);
-        // ⚠ Remember only scripts that exist: a name nobody published is a miss every
-        // time, never an entry, so resolving arbitrary names cannot grow this map.
-        if built.is_some() || matches!(shared.backend.head(name), Ok(Some(_))) {
-            shared
-                .described
-                .lock()
-                .expect("the described-script memo")
-                .insert(name.to_string(), built.clone());
-        }
+        let Ok(Some(head)) = shared.backend.head(name) else {
+            // ⚠ Remember only scripts that exist: a name nobody wrote is a miss every time,
+            // never an entry, so resolving arbitrary names cannot grow this map.
+            return Contract::Template;
+        };
+        let built = self.build(name, &head);
+        shared
+            .described
+            .lock()
+            .expect("the described-script memo")
+            .insert(name.to_string(), built.clone());
         built
     }
 
-    fn build(&self, name: &str) -> Option<PerScript> {
-        let shared = &self.shared;
-        let head = shared.backend.head(name).ok()??;
-        // ★ A draft never published wears the TEMPLATE's contract. Meta is answered from the
-        // description to anyone who can reach the door (the kernel's, before any endpoint
-        // runs, so it cannot ask who is calling), and a script's own contract is made of its
-        // text: its parameters, its leading comment, the graphs it names. Its own entry would
-        // publish all three, and that the draft exists. Its run is still refused (for its
-        // state, to its author; as absent, to everyone else), now at the template's floor.
-        if !ever_published(&head, &head.version) {
-            return None;
+    fn build(&self, name: &str, head: &Head) -> Contract {
+        // ★ A draft never published wears the template's contract. Meta is answered from
+        // the description to anyone who can reach the door (the kernel's, before any
+        // endpoint runs, so it cannot ask who is calling), and a script's own contract is
+        // made of its text: its parameters, its leading comment, the graphs it names. Its own
+        // entry would publish all three, and that the draft exists. Its run is still refused
+        // (for its state, to its author; as absent, to everyone else).
+        if !ever_published(head, &head.version) {
+            return Contract::Template;
         }
-        let version = shared.backend.version(name, &head.version).ok()??;
-        match version.language {
+        // A head that points at a version its backend cannot read keeps the stricter floor;
+        // the run says what is wrong.
+        let Ok(Some(version)) = self.shared.backend.version(name, &head.version) else {
+            return Contract::Lisp;
+        };
+        let own = match version.language {
+            Language::Lisp if head.state == State::Published => return Contract::Lisp,
             Language::Lisp => None,
-            Language::Sparql => self.build_sparql(name, &head, &version),
-            Language::Plan => self.build_plan(name, &head, &version),
-        }
+            Language::Sparql => self.build_sparql(name, head, &version),
+            Language::Plan => self.build_plan(name, head, &version),
+        };
+        // A query this host cannot analyze (or run: it mounts no SPARQL door) needs no
+        // language grant either; its run says why it cannot run.
+        own.map_or(Contract::Template, Contract::Own)
     }
 
     /// A per-script endpoint: the template's, behind `description`.
@@ -1914,8 +2036,10 @@ impl ScriptSpace {
         &self,
         inner: Arc<dyn Endpoint>,
         id: String,
-        description: Description,
+        mut description: Description,
+        head: &Head,
     ) -> Arc<dyn Endpoint> {
+        description.summary.push_str(&run_gate_note(head));
         Arc::new(Described {
             inner,
             id,
@@ -1999,7 +2123,7 @@ impl ScriptSpace {
                 ))
                 .verb(Verb::Meta)
         };
-        let result = self.described(self.result_endpoint(), id, description);
+        let result = self.described(self.result_endpoint(), id, description, head);
         let id = format!("script-{name}-runs");
         let mut spec = params(ActionSpec::new(Verb::Sink))
             .summary(format!(
@@ -2021,6 +2145,7 @@ impl ScriptSpace {
                 ))
                 .verb(Verb::Meta)
                 .action(spec),
+            head,
         );
         Some(PerScript {
             result,
@@ -2094,7 +2219,7 @@ impl ScriptSpace {
                 ))
                 .verb(Verb::Meta)
         };
-        let result = self.described(self.result_endpoint(), id, description);
+        let result = self.described(self.result_endpoint(), id, description, head);
         let id = format!("script-{name}-runs");
         let runs = self.described(
             self.runs_endpoint(),
@@ -2115,6 +2240,7 @@ impl ScriptSpace {
                         .input(as_arg())
                         .output(PLAIN),
                 ),
+            head,
         );
         Some(PerScript {
             result,
@@ -2123,6 +2249,28 @@ impl ScriptSpace {
             listed: head.state == State::Published,
         })
     }
+}
+
+/// What a script's own contract says about its run gate when the kernel's floor cannot say
+/// it (ledger #1261): for a script in a namespace, that the floor is the namespace's family
+/// and why. A public script's floor is every run grant's family, and a name with no `-`
+/// declares its exact grant, which the floor's refusal names as it stands.
+///
+/// ★ The floor's refusal is the KERNEL's ("capability does not grant `…:run:team-*`"), and
+/// the endpoint is never entered to add to it, so this is said where a refused caller can
+/// read it: the contract Meta answers.
+fn run_gate_note(head: &Head) -> String {
+    let floor = authority::run_floor(&head.name);
+    if head.public || floor == cap_run(&head.name) {
+        return String::new();
+    }
+    format!(
+        " Running it needs `{}` or a namespace grant covering it. A name with a `-` is in a \
+         namespace, and a contract cannot depend on who asks, so the kernel's floor checks the \
+         family of its top-level namespace, `{floor}`: any grant in it passes there, and the \
+         exact rule is checked when the run starts.",
+        cap_run(&head.name)
+    )
 }
 
 /// `spec` with a script's own `inputs`, the run gate and every scope its version requires.
@@ -2204,21 +2352,26 @@ impl Space for ScriptSpace {
             }
             Resolution::Miss => return resolution,
         };
-        match self.per_script(&name) {
-            Some(per) => resolution.map_endpoint(|_| match part {
-                Door::Result => per.result,
-                Door::Runs => per.runs,
-            }),
-            None => resolution,
-        }
+        let (result, runs) = match self.contract(&name) {
+            Contract::Own(per) => (per.result, per.runs),
+            Contract::Template => return resolution,
+            Contract::Lisp => (Arc::clone(&self.lisp.result), Arc::clone(&self.lisp.runs)),
+        };
+        resolution.map_endpoint(|_| match part {
+            Door::Result => result,
+            Door::Runs => runs,
+        })
     }
 
     fn entries(&self) -> Option<Vec<SpaceEntry>> {
         let mut entries = self.inner.entries().unwrap_or_default();
         for name in self.shared.backend.names().unwrap_or_default() {
-            let Some(per) = self.per_script(&name).filter(|per| per.listed) else {
+            let Contract::Own(per) = self.contract(&name) else {
                 continue;
             };
+            if !per.listed {
+                continue;
+            }
             if per.reads {
                 entries.push(SpaceEntry::new(
                     name::part_iri(&name, "result"),
