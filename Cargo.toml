@@ -116,15 +116,32 @@ ikigai-vocab = "0.1.47"
 # (ledger #1083), and where the `http-client` feature `http-client-probe` below turns on exists.
 # The library still never links the store: this crate parses SPARQL and refuses SERVICE and LOAD
 # itself, and the store's refusal is the second layer, which the egress test pins too.
-# ⚠ `"0.2.10"` is `>=0.2.10, <0.3.0`.
-ikigai-store = "0.2.10"
+# **0.2.21 since ledger #1458, a SECURITY floor, not an API one** (ledger #1426, #1427, #1428,
+# #1429): before 0.2.21 a `GRAPH` block (every script's run reaches the store as one, since a
+# script's dataset is the graphs it names) and the other wrappers the planner erases hid their
+# patterns from the store's join bound, so a query inside every bound could plan uncancellably
+# for minutes; 0.2.21 counts a wrapper's patterns into the enclosing join (a real FILTER closing
+# a group included, bound 32), reserves the overdue-evaluation slot at start and bounds
+# `urn:iki:store:load`. A caret on 0.2.10 ADMITTED 0.2.21 but did not REQUIRE it, so a lock could
+# keep an older store and the tests would pin the bounds of a store no host should run. This
+# crate's own SPARQL is unaffected: it sends the publisher's text with values substituted in the
+# algebra and the dataset clauses removed, which neither widens nor narrows a join, and the widest
+# join any test or README script sends is 4 operands (the cross product in
+# `tests/sparql_time_budget.rs`), the same under 0.2.21's rule as before it.
+# ⚠ `"0.2.21"` is `>=0.2.21, <0.3.0`.
+ikigai-store = "0.2.21"
 # The module a plan's steps read in `tests/root_plan.rs` (ledger #1220): a plan whose one step
 # is `Source urn:iki:ledger:{L}:next` or `…:items`, run under gonk's script ceiling copied
 # verbatim. Its reads DECLARE families (`urn:cap:ledger:read:*`, `urn:cap:store:read:graph:*`)
 # and CHECK exact per-ledger tokens inside, which is the case a run's derived authority has
-# to meet. 0.8.0 is the published line (0.9.0 adds `count` and changes nothing these reads
-# declare). The library never links it. ⚠ `"0.8.0"` is `<0.9.0`.
-ikigai-ledger = "0.8.0"
+# to meet. **0.11.1 since ledger #1458**: `"0.8.0"` was a CEILING (`<0.9.0`) that froze the test
+# out of 0.9, 0.10 and 0.11 and of 0.11.1's own store floor (0.2.21, the security floor above).
+# Nothing these tests use changed between them: they bind `ikigai_ledger::space()` and read
+# `next` and `items`, whose declared and checked grants are what 0.8.0's were (0.9.0 added
+# `count`, 0.10.0 the `about` grant, 0.11.0 `ClaimKind::Agent` with `ClaimKind` now
+# `#[non_exhaustive]`, which no test here matches on; 0.11.1 is fixes only). The library never
+# links it. ⚠ `"0.11.1"` is `<0.12.0`.
+ikigai-ledger = "0.11.1"
 # The REAL plan doors (`urn:plan:eval`, `urn:plan:validate`, `urn:plan:requires`), which every
 # plan test runs against beside the double in `tests/common/plan.rs` (ledger #1222): the double
 # states the contract this crate relies on, the engine is what a host binds. `plan-reader` is
@@ -141,7 +158,7 @@ ikigai-shacl = "0.3.3"
 # Only for the egress test's CONTROL (`tests/sparql_service_egress.rs`): oxigraph's own
 # evaluator, with no ikigai layer, really does reach a local stub in the probe build, so "the
 # stub saw nothing" is not vacuous. No default features: the probe feature adds the client.
-# 0.5.11 is what ikigai-store 0.2.10 resolves to and the oxigraph spargebra 0.4.7 belongs to.
+# 0.5.11 is what ikigai-store 0.2.21 resolves to and the oxigraph spargebra 0.4.7 belongs to.
 # ⚠ `"0.5.11"` is `<0.6.0`: move it with spargebra.
 oxigraph = { version = "0.5.11", default-features = false }
 
