@@ -21,8 +21,17 @@
 //!   `tests/lifecycle.rs` covers both polarities.
 //! - **`script-catalog` is live**: a failed run is recorded without a write through any
 //!   name the catalog could hang from.
-//! - **`urn:lisp:eval` is in this kernel** because a run composes over it; it is
-//!   `ikigai-lisp`'s to conform, and its own suite does.
+//! - **The walk is scoped to `script*`** (`Suite::own`): everything else a test kernel
+//!   binds is INHERITED, not walked, and each host's inherited list is pinned exactly with
+//!   the reason it is not this crate's (`BASE_INHERITED`, `STORE_IDS`, `plan_inherited`),
+//!   so an endpoint this crate gains outside `script*` turns a test red rather than joining
+//!   the pile unseen. `urn:lisp:eval` is in this kernel because a run composes over it; it
+//!   is `ikigai-lisp`'s to conform, and its own suite does.
+//! - **`REQUIRED` covers the mutating verbs too** (`Suite::required_on_mutating`): every
+//!   kernel here is a test fixture, so a dropped input the endpoint wrongly accepted would
+//!   write only into it. On a READ, REQUIRED has something to drop only where a published
+//!   SPARQL script declares a required parameter (`walkq`'s `days`): this crate's own reads
+//!   take their names from the IRI, and every by-value argument they declare is optional.
 //! - **`space(config)` is HOST-named** (`SPACE-NAME`, ledger #987): its doors are fixed,
 //!   but what they answer is the backend, ceiling and SPARQL door it was handed, and every
 //!   published SPARQL script or plan adds entries of its own. A name is a cache claim (same
@@ -55,18 +64,49 @@ fn seeded() -> (Host, String) {
     (host, digest)
 }
 
+/// What every test kernel binds beside this crate, and why none of it is walked.
+const BASE_INHERITED: [(&str, &str); 4] = [
+    (
+        "eval",
+        "ikigai-lisp's own conformance suite covers it; it is bound here only because every \
+         run composes over it",
+    ),
+    ("whoami", "a test probe, not part of this crate"),
+    ("vault", "a test probe, not part of this crate"),
+    ("fallback", "a test probe, not part of this crate"),
+];
+
+/// The inherited list is EXACTLY what each host binds beside the crate: a reason is only
+/// true of the id it names, and a new id outside `script*` must be accounted for. Each
+/// reason is printed beside the report, which no longer carries it as an opt-out would.
+fn assert_inherited(report: &ikigai_conformance::Report, expected: &[(&str, String)]) {
+    for (id, why) in expected {
+        println!("inherited because: {id}: {why}");
+    }
+    let mut inherited: Vec<&str> = report
+        .declared
+        .inherited
+        .iter()
+        .map(String::as_str)
+        .collect();
+    inherited.sort_unstable();
+    let mut expected: Vec<&str> = expected.iter().map(|(id, _)| *id).collect();
+    expected.sort_unstable();
+    assert_eq!(inherited, expected, "{report}");
+}
+
+fn base_inherited() -> Vec<(&'static str, String)> {
+    BASE_INHERITED
+        .iter()
+        .map(|(id, why)| (*id, why.to_string()))
+        .collect()
+}
+
 fn suite(digest: &str, space: &Arc<ScriptSpace>) -> Suite {
     Suite::new()
+        .own("script*")
+        .required_on_mutating()
         .host_named_space(SPACE_LABEL, Arc::clone(space))
-        .opt_out(
-            "eval",
-            None,
-            "ikigai-lisp's own conformance suite covers it; it is bound here only because \
-             every run composes over it",
-        )
-        .opt_out("whoami", None, "a test probe, not part of this crate")
-        .opt_out("vault", None, "a test probe, not part of this crate")
-        .opt_out("fallback", None, "a test probe, not part of this crate")
         .fixture(Fixture::new("script", Verb::Source).binding("name", "walk"))
         .fixture(Fixture::new("script", Verb::Exists).binding("name", "walk"))
         .fixture(
@@ -135,6 +175,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
         .filter(|id| id.starts_with("script"))
         .collect();
     walked.sort_unstable();
+    assert_inherited(&report, &base_inherited());
     assert_eq!(
         walked,
         vec![
@@ -156,6 +197,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
 // entry: the per-script `…:result` and `…:runs` must conform like any endpoint.
 // ---------------------------------------------------------------------------------------
 
+/// The store doors every SPARQL run composes over, inherited.
 const STORE_IDS: [&str; 13] = [
     "store-select",
     "store-graph-select",
@@ -204,16 +246,7 @@ fn sparql_seeded() -> (SparqlHost, String) {
 }
 
 fn sparql_suite(digest: &str, space: &Arc<ScriptSpace>) -> Suite {
-    STORE_IDS
-        .iter()
-        .fold(suite(digest, space), |suite, id| {
-            suite.opt_out(
-                *id,
-                None,
-                "ikigai-store's own conformance suite covers it; it is bound here because \
-                 every SPARQL run composes over it",
-            )
-        })
+    suite(digest, space)
         .fixture(Fixture::new("script-walkq-result", Verb::Source).arg("days", "1"))
         // A SPARQL run's piped `content` is its parameters as one JSON object.
         .fixture(
@@ -234,6 +267,21 @@ fn a_host_with_sparql_scripts_conforms() {
     let report = sparql_suite(&digest, &host.space).run_blocking(&host.kernel);
     println!("{report}");
     assert!(report.is_clean(), "{report}");
+    let store = STORE_IDS.iter().map(|id| {
+        (
+            *id,
+            "ikigai-store's own conformance suite covers it; it is bound here because every \
+             SPARQL run composes over it"
+                .to_string(),
+        )
+    });
+    assert_inherited(
+        &report,
+        &base_inherited()
+            .into_iter()
+            .chain(store)
+            .collect::<Vec<_>>(),
+    );
     let mut walked: Vec<&str> = report
         .walked
         .iter()
@@ -293,7 +341,9 @@ fn plan_seeded(doors: Doors) -> (PlanHost, String) {
     (host, digest)
 }
 
-fn plan_suite(doors: Doors, digest: &str, space: &Arc<ScriptSpace>) -> Suite {
+/// What a plan host binds beside the crate and the base kernel, and why none of it is
+/// walked.
+fn plan_inherited(doors: Doors) -> Vec<(&'static str, String)> {
     let which = match doors {
         Doors::Double => "here a test double of its contract",
         Doors::Engine => "here ikigai-engine's, conformance-tested in ikigai-cli",
@@ -318,10 +368,10 @@ fn plan_suite(doors: Doors, digest: &str, space: &Arc<ScriptSpace>) -> Suite {
         ));
     }
     doors_and_probes
-        .into_iter()
-        .fold(suite(digest, space), |suite, (id, why)| {
-            suite.opt_out(id, None, &why)
-        })
+}
+
+fn plan_suite(digest: &str, space: &Arc<ScriptSpace>) -> Suite {
+    suite(digest, space)
         .fixture(Fixture::new("script-walkp-result", Verb::Source).arg("who", "conformance"))
         // A plan run's piped `content` is its parameters as one JSON object.
         .fixture(Fixture::new("script-walkp-runs", Verb::Sink).arg("content", "{}"))
@@ -332,9 +382,10 @@ fn plan_suite(doors: Doors, digest: &str, space: &Arc<ScriptSpace>) -> Suite {
 fn a_host_with_plan_scripts_conforms() {
     both(|doors| {
         let (host, digest) = plan_seeded(doors);
-        let report = plan_suite(doors, &digest, &host.space).run_blocking(&host.kernel);
+        let report = plan_suite(&digest, &host.space).run_blocking(&host.kernel);
         println!("{report}");
         assert!(report.is_clean(), "{report}");
+        assert_inherited(&report, &[base_inherited(), plan_inherited(doors)].concat());
         let mut walked: Vec<&str> = report
             .walked
             .iter()
