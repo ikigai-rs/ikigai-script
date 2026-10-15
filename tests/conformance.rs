@@ -13,9 +13,20 @@
 //!
 //! # What the suite cannot say, and this file says instead
 //!
-//! - **The version and run reads are `pure`.** A version is named by its content and a
-//!   finished run never changes, so neither has a thread but its own name, and nothing
-//!   writes through those names. That is what "pure" means to the suite.
+//! - **The version and run reads are NOT `pure`**, though a version is named by its
+//!   content and a finished run never changes. Whether a version exists, and who may see
+//!   it, is the script's state, so `script-version` hangs from the script's thread
+//!   (`urn:script:{name}`, cut by every publish and retire); whether run `{id}` exists is
+//!   the state a run writes, so `script-run` hangs from `urn:script:{name}:runs` (ledger
+//!   #1076, #1079). A pure function hangs from nothing but what it read, and since
+//!   conformance 0.8.3 the suite checks that claim (ledger #1508): declared pure, these two
+//!   were refused for carrying a foreign thread. The thread they carry is what cuts them,
+//!   so the "no thread but its own name" rule `pure` exempts from does not fire either.
+//! - **`script-version` is declared cacheable**: a cached answer, the negative `Exists`
+//!   included, is the point of hanging it from the script's thread (an uncacheable `Exists`
+//!   would make every composite over it uncacheable). **`script-run` is neither cacheable
+//!   nor live**: a finished run's record is cacheable, a running one's is not, and its
+//!   `Exists` answers fresh.
 //! - **`script-result` is neither declared cacheable nor live**: it is exactly as
 //!   cacheable as the script it runs (the fixture's `(+ 1 2)` is not), and
 //!   `tests/lifecycle.rs` covers both polarities.
@@ -141,8 +152,7 @@ fn suite(digest: &str, space: &Arc<ScriptSpace>) -> Suite {
         .fixture(Fixture::new("script-eval", Verb::Sink).arg("content", "(+ 1 2)"))
         .cacheable("script")
         .cacheable("script-compiled")
-        .pure("script-version")
-        .pure("script-run")
+        .cacheable("script-version")
         .live("script-catalog")
 }
 
