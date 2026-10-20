@@ -97,15 +97,19 @@ oxrdf = "0.3.4"
 
 [dev-dependencies]
 futures = "0.3"
-# The module recipe as one test. 0.8.0 is the CURRENT published definition of "done":
+# The module recipe as one test. 0.10.0 is the CURRENT published definition of "done":
 # REQUIRED (a required input dropped must be refused, typed), `Suite::own` (the walk scoped
 # to this crate's `script*` endpoints, the store, plan doors, evaluator and probes beside
-# them inherited), VALIDATE (0.7.0), and SPACE-NAME (0.6.0, ledger #987), whose
-# `host_named_space` declaration `tests/conformance.rs` makes for `space(config)`. It needs
-# core 0.1.100, which is why the core pin above is there.
-# ⚠ `"0.8.0"` is `<0.9.0`: raise it when conformance moves, or this crate keeps reporting
-# green against an old rulebook.
-ikigai-conformance = "0.8.0"
+# them inherited), VALIDATE (0.7.0), SPACE-NAME (0.6.0, ledger #987), whose
+# `host_named_space` declaration `tests/conformance.rs` makes for `space(config)`, then 0.9.0:
+# core 0.1.105's contract-shape checks (REQUIRED probes input groups, OUTPUTS honors
+# `output_from`, PIPELINE's named-only line, VALIDATE refuses a default on a binding) and
+# RECOMPUTE; and 0.10.0: FAILURES, OFF unless a suite opts in with `Suite::check_failures()`
+# (this crate does not yet, so the report carries one `skipped: FAILURES` line). Its own floor
+# is core 0.1.108, which the tests resolve; the core pin above is what the code needs.
+# ⚠ `"0.10.0"` is `>=0.10.0, <0.11.0`: raise it when conformance moves, or this crate keeps
+# reporting green against an old rulebook.
+ikigai-conformance = "0.10.0"
 # The evaluator, through the kernel, as a host would mount it. The LIBRARY never links
 # Steel: a script reaches `urn:lisp:eval` as a sub-request, so the language is a resource.
 # 0.1.15 is the published line; 0.2.0 (the allowlist sandbox, ledger #903) is merged but
