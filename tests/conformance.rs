@@ -208,7 +208,7 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
 // ---------------------------------------------------------------------------------------
 
 /// The store doors every SPARQL run composes over, inherited.
-const STORE_IDS: [&str; 13] = [
+const STORE_IDS: [&str; 15] = [
     "store-select",
     "store-graph-select",
     "store-ask",
@@ -222,6 +222,8 @@ const STORE_IDS: [&str; 13] = [
     "store-update",
     "store-graph-update",
     "store-load",
+    "store-graph-info",
+    "store-dump",
 ];
 
 fn sparql_seeded() -> (SparqlHost, String) {
