@@ -139,8 +139,10 @@ ikigai-vocab = "0.1.47"
 # algebra and the dataset clauses removed, which neither widens nor narrows a join, and the widest
 # join any test or README script sends is 4 operands (the cross product in
 # `tests/sparql_time_budget.rs`), the same under 0.2.21's rule as before it.
-# ⚠ `"0.2.21"` is `>=0.2.21, <0.3.0`.
-ikigai-store = "0.2.21"
+# 0.2.24 is the floor of `STORE_IDS` in `tests/conformance.rs`: it adds `store-graph-info` and
+# `store-dump`, which the exact list names (ledger #2111).
+# ⚠ `"0.2.24"` is `>=0.2.24, <0.3.0`.
+ikigai-store = "0.2.24"
 # The module a plan's steps read in `tests/root_plan.rs` (ledger #1220): a plan whose one step
 # is `Source urn:iki:ledger:{L}:next` or `…:items`, run under gonk's script ceiling copied
 # verbatim. Its reads DECLARE families (`urn:cap:ledger:read:*`, `urn:cap:store:read:graph:*`)
