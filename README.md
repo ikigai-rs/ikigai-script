@@ -291,10 +291,9 @@ hangs from.
 Reached as a resource: a run is a sub-request to
 `urn:lisp:eval` with the program as `in` and the run's input as `data` (read with
 `(input)`), so this crate links no interpreter. Built and tested against the published
-`ikigai-lisp` 0.1.15. When 0.2.0 (the allowlist sandbox) is published nothing here changes
-but the dev-dependency pin: the sandbox narrows what a program can do inside the
-evaluator, and everything it can reach outside still goes through the verbs, under the
-run's capability.
+`ikigai-lisp` 0.4.0, on core's 0.2 streams release. Its allowlist sandbox narrows what
+a program can do inside the evaluator, and everything it can reach outside still goes
+through the verbs, under the run's capability.
 
 The compiled form, for Lisp, is preparation rather than compilation: `ikigai-lisp`
 offers no compile step to cache, so `…:compiled` is the head version's program bound to
