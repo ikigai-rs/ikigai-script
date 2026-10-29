@@ -71,9 +71,9 @@ oxrdf = "0.3.4"
 
 [dev-dependencies]
 futures = "0.3"
-# The module recipe as one test. 0.11.0 enables DATATYPES and FAILURES by default;
-# FAILURES checks actions that declare failure classes.
-ikigai-conformance = "0.11.0"
+# The module recipe as one test. 0.12.0 enables BODIES and BODY-INPUTS by default;
+# the suite supplies the same module space the kernel binds so bodies are probed.
+ikigai-conformance = "0.12.0"
 # The evaluator, through the kernel, as a host would mount it. The LIBRARY never links
 # Steel: a script reaches `urn:lisp:eval` as a sub-request, so the language is a resource.
 # 0.4.0 is the published core 0.2 streams line.

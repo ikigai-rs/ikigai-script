@@ -55,8 +55,8 @@ mod common;
 use std::sync::Arc;
 
 use common::*;
-use ikigai_conformance::{Fixture, Suite};
-use ikigai_core::Verb;
+use ikigai_conformance::{Check, Fixture, Suite};
+use ikigai_core::{Capability, Verb};
 use ikigai_script::ScriptSpace;
 
 /// What findings name `space(config)` by, and the report line that says it was checked.
@@ -106,6 +106,29 @@ fn assert_inherited(report: &ikigai_conformance::Report, expected: &[(&str, Stri
     assert_eq!(inherited, expected, "{report}");
 }
 
+/// Only volatile Source answers may skip BODIES. In particular, missing shared-space
+/// wiring must fail even when the report has no findings. The module currently declares
+/// no reads_body inputs; if it gains any, their transport probes must all run.
+fn assert_body_coverage(report: &ikigai_conformance::Report) {
+    assert!(report.checks.contains(Check::Bodies), "{report}");
+    assert!(report.checks.contains(Check::BodyInputs), "{report}");
+    for unprobed in report.unprobed.iter() {
+        match unprobed.check {
+            Check::Bodies => assert!(
+                matches!(
+                    unprobed.endpoint.as_str(),
+                    "script-catalog" | "script-result"
+                ) && unprobed
+                    .reason
+                    .starts_with("uncacheable, time-varying, or volatile answer:"),
+                "{report}"
+            ),
+            Check::BodyInputs => panic!("{report}"),
+            _ => {}
+        }
+    }
+}
+
 fn base_inherited() -> Vec<(&'static str, String)> {
     BASE_INHERITED
         .iter()
@@ -114,11 +137,20 @@ fn base_inherited() -> Vec<(&'static str, String)> {
 }
 
 fn suite(digest: &str, space: &Arc<ScriptSpace>) -> Suite {
+    // BODIES lowers the caller's memory budget. Root would be replaced with only
+    // the declared family marker (`read:*`), which is a presence test, not a grant
+    // to this script. Keep the concrete read grant through the bounded probe.
+    let read_walk = Capability::scoped([ikigai_script::authority::cap_read("walk")]);
     Suite::new()
         .own("script*")
         .required_on_mutating()
         .host_named_space(SPACE_LABEL, Arc::clone(space))
-        .fixture(Fixture::new("script", Verb::Source).binding("name", "walk"))
+        .body_space(Arc::clone(space))
+        .fixture(
+            Fixture::new("script", Verb::Source)
+                .binding("name", "walk")
+                .capability(read_walk.clone()),
+        )
         .fixture(Fixture::new("script", Verb::Exists).binding("name", "walk"))
         .fixture(
             Fixture::new("script", Verb::Sink)
@@ -128,6 +160,7 @@ fn suite(digest: &str, space: &Arc<ScriptSpace>) -> Suite {
         .fixture(Fixture::new("script", Verb::Delete).binding("name", "retiree"))
         .fixture(
             Fixture::new("script-version", Verb::Source)
+                .capability(read_walk.clone())
                 .binding("name", "walk")
                 .binding("digest", digest),
         )
@@ -136,11 +169,16 @@ fn suite(digest: &str, space: &Arc<ScriptSpace>) -> Suite {
                 .binding("name", "walk")
                 .binding("digest", digest),
         )
-        .fixture(Fixture::new("script-compiled", Verb::Source).binding("name", "walk"))
+        .fixture(
+            Fixture::new("script-compiled", Verb::Source)
+                .binding("name", "walk")
+                .capability(read_walk.clone()),
+        )
         .fixture(Fixture::new("script-result", Verb::Source).binding("name", "walk"))
         .fixture(Fixture::new("script-runs", Verb::Sink).binding("name", "walk"))
         .fixture(
             Fixture::new("script-run", Verb::Source)
+                .capability(read_walk)
                 .binding("name", "walk")
                 .binding("id", "1"),
         )
@@ -162,6 +200,7 @@ fn conforms() {
     let report = suite(&digest, &host.space).run_blocking(&host.kernel);
     println!("{report}");
     assert!(report.is_clean(), "{report}");
+    assert_body_coverage(&report);
     // The positive half of SPACE-NAME: the declaration reached the check, and the space
     // the kernel binds claims no name.
     assert!(
@@ -279,6 +318,7 @@ fn a_host_with_sparql_scripts_conforms() {
     let report = sparql_suite(&digest, &host.space).run_blocking(&host.kernel);
     println!("{report}");
     assert!(report.is_clean(), "{report}");
+    assert_body_coverage(&report);
     let store = STORE_IDS.iter().map(|id| {
         (
             *id,
@@ -397,6 +437,7 @@ fn a_host_with_plan_scripts_conforms() {
         let report = plan_suite(&digest, &host.space).run_blocking(&host.kernel);
         println!("{report}");
         assert!(report.is_clean(), "{report}");
+        assert_body_coverage(&report);
         assert_inherited(&report, &[base_inherited(), plan_inherited(doors)].concat());
         let mut walked: Vec<&str> = report
             .walked
