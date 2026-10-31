@@ -554,6 +554,13 @@ on, so a step nothing feeds into the result is neither run nor in the plan's aut
   required argument to route a pipe into. Pipe into `…:runs` (its `content`), or name
   `data=`.
 
+## Accessibility
+
+What this crate writes that people read (the plain faces, the run record, the catalog and the
+refusals), the rules it follows and its known limitations are in
+[ACCESSIBILITY.md](https://github.com/ikigai-rs/ikigai-script/blob/main/ACCESSIBILITY.md). Report
+a barrier with an issue labeled `accessibility`.
+
 ## License
 
 MIT OR Apache-2.0.
