@@ -205,3 +205,77 @@ fn a_run_record_written_by_hand_is_never_overwritten() {
         "a note, not a run"
     );
 }
+
+#[test]
+fn a_starting_run_is_never_read_half_written() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Barrier;
+
+    use ikigai_script::model::{Outcome, Run, SCHEMA};
+
+    let scratch = Scratch::new("atomic-start");
+    let backend = DirBackend::open(&scratch.0).unwrap();
+    // A large capability snapshot widens the publication window without sleeps or
+    // changes to the backend. Both readers must see absence or a complete record.
+    let run = Run {
+        schema: SCHEMA,
+        name: "job".into(),
+        id: 0,
+        version: "sha256:test".into(),
+        principal: "urn:test:runner".into(),
+        capability: [format!("urn:cap:test:{}", "x".repeat(8 * 1024 * 1024))].into(),
+        started: None,
+        ended: None,
+        outcome: Outcome::Running,
+        result: None,
+        truncated: false,
+        trace_span: None,
+    };
+    let ready = Barrier::new(3);
+    let done = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            ready.wait();
+            let result = backend.start_run("job", &run);
+            done.store(true, Ordering::Release);
+            result
+        });
+        let readers: Vec<_> = [false, true]
+            .into_iter()
+            .map(|latest| {
+                let backend = &backend;
+                let ready = &ready;
+                let done = &done;
+                scope.spawn(move || {
+                    ready.wait();
+                    loop {
+                        let record = if latest {
+                            backend.last_run("job")
+                        } else {
+                            backend.run("job", 1)
+                        }?;
+                        if let Some(record) = record {
+                            assert_eq!(record.id, 1);
+                            return Ok::<_, Error>(record);
+                        }
+                        if done.load(Ordering::Acquire) {
+                            return backend.run("job", 1).map(|r| r.expect("published run"));
+                        }
+                        std::thread::yield_now();
+                    }
+                })
+            })
+            .collect();
+        assert_eq!(writer.join().unwrap().unwrap(), 1);
+        let expected = Run {
+            id: 1,
+            ..run.clone()
+        };
+        for reader in readers {
+            assert_eq!(
+                reader.join().unwrap().expect("complete run record"),
+                expected
+            );
+        }
+    });
+}
