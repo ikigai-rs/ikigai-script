@@ -47,6 +47,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use ikigai_core::{Error, Result};
@@ -387,23 +388,12 @@ impl Backend for DirBackend {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|e| io_error(parent, "create", &e))?;
             }
-            let bytes = to_json(&Run { id, ..run.clone() })?;
-            // `create_new`: an id is taken by whoever creates its file first, so a record
-            // written by hand (or by another process, against the rule) is never
-            // overwritten; the next id is tried instead.
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut file) => {
-                    file.write_all(&bytes)
-                        .map_err(|e| io_error(&path, "write", &e))?;
-                    return Ok(id);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => id += 1,
-                Err(e) => return Err(io_error(&path, "create", &e)),
+            // Publish a complete file only if the id is still free. A hand-written
+            // record that arrives after last_run_id wins without being overwritten.
+            if write_new_json(&path, &Run { id, ..run.clone() })? {
+                return Ok(id);
             }
+            id += 1;
         }
     }
 
@@ -461,4 +451,59 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, to_json(value)?).map_err(|e| io_error(&tmp, "write", &e))?;
     fs::rename(&tmp, path).map_err(|e| io_error(path, "replace", &e))
+}
+
+/// Publish a complete record without replacing an existing destination. The hard link
+/// makes checking absence and publishing one atomic operation; a plain rename could
+/// overwrite a record that appeared while the temporary file was being written.
+fn write_new_json<T: Serialize>(path: &Path, value: &T) -> Result<bool> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    let bytes = to_json(value)?;
+    let (tmp, mut file) = loop {
+        let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_extension(format!("json.{}.{serial}.tmp", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => break (tmp, file),
+            // A stale temporary file from a stopped host is never reused.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(io_error(&tmp, "create", &e)),
+        }
+    };
+    let result = (|| {
+        file.write_all(&bytes)
+            .map_err(|e| io_error(&tmp, "write", &e))?;
+        drop(file);
+        match fs::hard_link(&tmp, path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(io_error(path, "create", &e)),
+        }
+    })();
+    // A crash can leave this non-record temporary file behind, but readers ignore it.
+    let _ = fs::remove_file(tmp);
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publishing_a_new_record_does_not_replace_an_occupied_destination() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("occupied-run-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("1.json");
+        fs::write(&path, "an editor's record").unwrap();
+        assert!(!write_new_json(&path, &"new record").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "an editor's record");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
