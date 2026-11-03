@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-script"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 # The toolchain the shared CI's msrv job builds and tests on. Nothing in this crate needs
 # more than edition 2021; 1.89 is the line the ecosystem's other declared crates
@@ -24,9 +24,9 @@ keywords = ["ikigai", "roc", "scripting", "capability", "module"]
 categories = ["development-tools"]
 
 [dependencies]
-# 0.2.0 is the streams release (ledger #2261). The old 0.1 pin meant
-# <0.2.0 under 0.x rules; this caret floor admits compatible 0.2.x patches.
-ikigai-core = "0.2.0"
+# 0.3.0 scopes held content to its deliverer and makes ContentStore::put/put_replay
+# root-only (the scoped content store, ledger #2965). Public APIs use core 0.3 types.
+ikigai-core = "0.3.0"
 # `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the backend and the
 # host's ceiling), so they are `Endpoint` impls, not closures.
 async-trait = "0.1"
@@ -71,9 +71,9 @@ oxrdf = "0.3.4"
 
 [dev-dependencies]
 futures = "0.3"
-# The module recipe as one test. 0.12.0 enables BODIES and BODY-INPUTS by default;
-# the suite supplies the same module space the kernel binds so bodies are probed.
-ikigai-conformance = "0.12.0"
+# The module recipe as one test. 0.14.0 uses core 0.3 and its scoped content store
+# (ledger #2965); the suite supplies the module space so bodies are probed.
+ikigai-conformance = "0.14.0"
 # The evaluator, through the kernel, as a host would mount it. The LIBRARY never links
 # Steel: a script reaches `urn:lisp:eval` as a sub-request, so the language is a resource.
 # 0.4.0 is the published core 0.2 streams line.
@@ -81,9 +81,8 @@ ikigai-lisp = "0.4.0"
 # `TurtleRenderer` gives the test kernels a JSON Meta face. ⚠ Without one the engine's
 # pipe routing cannot be observed (it fails open onto an input named `in`), and the
 # conformance walk needs it, so every test kernel is `Kernel::with_meta_renderer`.
-# 0.2.0 is the streams release (ledger #2261); the old 0.1 pin meant
-# <0.2.0 under 0.x rules. This caret floor admits compatible 0.2.x patches.
-ikigai-vocab = "0.2.0"
+# 0.3.0 matches core 0.3 and its scoped content store (ledger #2965).
+ikigai-vocab = "0.3.0"
 # The store a SPARQL script runs against in the tests, in memory, bound exactly as a host binds
 # it: every run is a sub-request to its graph-scoped doors. 0.2.7 is where caller SPARQL is
 # bounded before the parser sees it (ledger #915), the behavior `src/limits.rs` copies.
