@@ -116,8 +116,9 @@ ikigai-ledger = "0.19.0"
 # plan test runs against beside the double in `tests/common/plan.rs` (ledger #1222): the double
 # states the contract this crate relies on, the engine is what a host binds. `plan-reader` is
 # the feature that compiles `plan_space` (off by default there, for wasm). 0.1.44 is the first
-# published engine with `plan_space`; the library never links it. 0.3.0 moves to core 0.3.
-ikigai-engine = { version = "0.3.0", features = ["plan-reader"] }
+# published engine with `plan_space`; the library never links it. 0.4.0 adds
+# `Engine::with_scope` (ledger #3081); the 0.3 range excludes this additive release.
+ikigai-engine = { version = "0.4.0", features = ["plan-reader"] }
 # What `urn:plan:validate` composes: the plan doors validate by sub-request to
 # `urn:shacl:validate` with the published shapes, so a host binding the engine's doors binds
 # this beside them. 0.6.0 is the published core 0.3 line. It brings rudof, whose `rudof_rdf` turns
