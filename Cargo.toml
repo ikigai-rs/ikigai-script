@@ -105,27 +105,38 @@ ikigai-vocab = "0.3.0"
 # 0.2.24 is the floor of `STORE_IDS` in `tests/conformance.rs`: it adds `store-graph-info` and
 # `store-dump`, which the exact list names (ledger #2111).
 # 0.4.0 is the published core 0.3 line.
-ikigai-store = "0.4.0"
+# **0.5.0 since ledger #3371** (wave 3 of the store 0.5.0 cascade, #3348): it adds the
+# `store-graph-written` door, which `STORE_IDS` in `tests/conformance.rs` now names. The caret is
+# `<0.6.0`, so the 0.4 line is excluded.
+ikigai-store = "0.5.0"
 # The module a plan's steps read in `tests/root_plan.rs` (ledger #1220): a plan whose one step
 # is `Source urn:iki:ledger:{L}:next` or `…:items`, run under gonk's script ceiling copied
 # verbatim. Its reads DECLARE families (`urn:cap:ledger:read:*`, `urn:cap:store:read:graph:*`)
 # and CHECK exact per-ledger tokens inside, which is the case a run's derived authority has
 # to meet. 0.19.0 is the published core 0.3 line. The library never links it.
-ikigai-ledger = "0.19.0"
+# **0.21.1 since ledger #3371**: the ledger built on store 0.5.0, so the graph carries one store.
+# 0.20.0 added cross-ledger listings and a claim fencing epoch; 0.21.0 enforces the label grammar
+# and makes close/reopen retry, then refuse as Conflict. `tests/root_plan.rs` appends one item and
+# reads `next`/`items`, which neither release changed. The caret is `<0.22.0`.
+ikigai-ledger = "0.21.1"
 # The REAL plan doors (`urn:plan:eval`, `urn:plan:validate`, `urn:plan:requires`), which every
 # plan test runs against beside the double in `tests/common/plan.rs` (ledger #1222): the double
 # states the contract this crate relies on, the engine is what a host binds. `plan-reader` is
 # the feature that compiles `plan_space` (off by default there, for wasm). 0.1.44 is the first
 # published engine with `plan_space`; the library never links it. 0.4.0 adds
 # `Engine::with_scope` (ledger #3081); the 0.3 range excludes this additive release.
-ikigai-engine = { version = "0.4.0", features = ["plan-reader"] }
+# **0.5.0 since ledger #3371**: the engine built on store 0.5.0, so the graph carries one store.
+# It refuses a relative or empty config home; no test here reaches one (`plan_space` reads no
+# config). The caret is `<0.6.0`, so the 0.4 line is excluded.
+ikigai-engine = { version = "0.5.0", features = ["plan-reader"] }
 # What `urn:plan:validate` composes: the plan doors validate by sub-request to
 # `urn:shacl:validate` with the published shapes, so a host binding the engine's doors binds
-# this beside them. 0.6.0 is the published core 0.3 line. It brings rudof, whose `rudof_rdf` turns
-# on `oxigraph/http-client` and oxrdf's `rdf-12` in the TEST build by feature unification: the
-# egress test's refusals hold in that build too, and its live-client controls still run only
-# under `http-client-probe`.
-ikigai-shacl = "0.6.0"
+# this beside them. 0.6.0 is the published core 0.3 line; **0.6.1 since ledger #3371** is the
+# release built on store 0.5.0, so the graph carries one store (the caret is `<0.7.0`). It brings
+# rudof, whose `rudof_rdf` turns on `oxigraph/http-client` and oxrdf's `rdf-12` in the TEST
+# build by feature unification: the egress test's refusals hold in that build too, and its
+# live-client controls still run only under `http-client-probe`.
+ikigai-shacl = "0.6.1"
 # Only for the egress test's CONTROL (`tests/sparql_service_egress.rs`): oxigraph's own
 # evaluator, with no ikigai layer, really does reach a local stub in the probe build, so "the
 # stub saw nothing" is not vacuous. No default features: the probe feature adds the client.

@@ -246,8 +246,9 @@ fn the_walk_reaches_every_resource_this_crate_binds() {
 // entry: the per-script `…:result` and `…:runs` must conform like any endpoint.
 // ---------------------------------------------------------------------------------------
 
-/// The store doors every SPARQL run composes over, inherited.
-const STORE_IDS: [&str; 15] = [
+/// The store doors every SPARQL run composes over, inherited. Store 0.5.0 adds
+/// `store-graph-written` (ledger #3371).
+const STORE_IDS: [&str; 16] = [
     "store-select",
     "store-graph-select",
     "store-ask",
@@ -263,6 +264,7 @@ const STORE_IDS: [&str; 15] = [
     "store-load",
     "store-graph-info",
     "store-dump",
+    "store-graph-written",
 ];
 
 fn sparql_seeded() -> (SparqlHost, String) {
