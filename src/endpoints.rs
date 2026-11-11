@@ -2588,9 +2588,14 @@ impl Endpoint for RunEndpoint {
             .bindings
             .get("id")
             .ok_or_else(|| Error::Endpoint("no `id` captured".to_string()))?;
-        let id = id_text.parse::<u64>().map_err(|_| Error::InvalidArgument {
+        let id = name::run_id(id_text).ok_or_else(|| Error::InvalidArgument {
             name: "id".to_string(),
-            detail: format!("`{id_text}` is not a run number"),
+            detail: format!(
+                "`{id_text}` is not a canonical run number for urn:script:{name}; \
+                 use decimal digits with no sign or leading zeros (except `0` itself), \
+                 at most {}",
+                u64::MAX
+            ),
         });
         let run = match id {
             Ok(id) => self.shared.backend.run(&name, id)?,
@@ -2628,7 +2633,7 @@ impl Endpoint for RunEndpoint {
     fn describe(&self) -> Description {
         let id = || {
             ArgSpec::new("id")
-                .summary("The run's number, unique per script.")
+                .summary("The run's number, unique per script: decimal digits with no sign or leading zeros.")
                 .class(XSD_INTEGER)
                 .binding()
         };

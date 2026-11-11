@@ -135,6 +135,11 @@ pub fn run_iri(name: &str, id: u64) -> String {
     format!("{PREFIX}{name}:run:{id}")
 }
 
+/// Read only the decimal spelling emitted by [`run_iri`], including zero.
+pub(crate) fn run_id(text: &str) -> Option<u64> {
+    text.parse::<u64>().ok().filter(|id| id.to_string() == text)
+}
+
 /// `urn:script:{name}:{part}`: `compiled`, `result` or `runs`.
 pub fn part_iri(name: &str, part: &str) -> String {
     format!("{PREFIX}{name}:{part}")

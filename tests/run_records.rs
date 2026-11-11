@@ -174,3 +174,49 @@ fn a_run_its_caller_stopped_waiting_for_is_recorded_as_cancelled() {
         Outcome::Failed { .. }
     ));
 }
+
+#[test]
+fn a_run_number_has_only_one_spelling() {
+    let (kernel, _) = host();
+    publish(&kernel, "job", "done");
+    common::ok(&kernel, Verb::Sink, "urn:script:job:runs", &[]);
+    assert_eq!(record(&kernel, "job", 1).id, 1);
+    let mut accepted = Vec::new();
+    for spelling in [
+        "01",
+        "+1",
+        "001",
+        "+01",
+        "-1",
+        "00",
+        "+0",
+        "18446744073709551616",
+    ] {
+        let iri = format!("urn:script:job:run:{spelling}");
+        let source = common::call(&kernel, &Capability::root(), Verb::Source, &iri, &[]);
+        if !matches!(source, Err(Error::InvalidArgument { .. })) {
+            accepted.push(format!("{spelling}: {source:?}"));
+        }
+        let exists = common::ok(&kernel, Verb::Exists, &iri, &[]);
+        if exists != "false\n" {
+            accepted.push(format!("Exists {spelling}: {exists:?}"));
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "noncanonical run numbers: {accepted:#?}"
+    );
+    // Zero and the largest u64 are canonical numbers, though neither was allocated.
+    for spelling in ["0", "18446744073709551615"] {
+        let iri = format!("urn:script:job:run:{spelling}");
+        assert!(matches!(
+            common::call(&kernel, &Capability::root(), Verb::Source, &iri, &[]),
+            Err(Error::NotFound(_))
+        ));
+        assert_eq!(common::ok(&kernel, Verb::Exists, &iri, &[]), "false\n");
+    }
+    assert_eq!(
+        common::ok(&kernel, Verb::Exists, "urn:script:job:run:1", &[]),
+        "true\n"
+    );
+}
