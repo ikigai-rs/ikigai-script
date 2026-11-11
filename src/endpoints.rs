@@ -1828,6 +1828,37 @@ impl Endpoint for ResultEndpoint {
     }
 }
 
+/// A started run not yet recorded as ended. Dropped while it still holds the run (the
+/// run's future was dropped before its sub-request answered), it records the run as
+/// failed, `cancelled`: the backend is synchronous, so the record is written in `drop`.
+/// It has no clock there, so `ended` stays unstamped.
+struct Unfinished<'a> {
+    backend: &'a dyn crate::backend::Backend,
+    run: Option<Run>,
+}
+
+impl Drop for Unfinished<'_> {
+    fn drop(&mut self) {
+        let Some(mut run) = self.run.take() else {
+            return;
+        };
+        run.outcome = Outcome::Failed {
+            kind: CANCELLED.to_string(),
+            message: format!(
+                "urn:script:{} stopped before it finished: the request that ran it was \
+                 dropped (its caller stopped waiting, or the host timed it out), so whatever \
+                 effects it had may be partial. Run it again to finish it",
+                run.name
+            ),
+        };
+        // Nothing to report a failure to: the request is gone. The record stays `running`.
+        let _ = self.backend.finish_run(&run.name, &run);
+    }
+}
+
+/// The kind a run record gives a run whose request was dropped before it finished.
+const CANCELLED: &str = "cancelled";
+
 struct RunsEndpoint {
     shared: Arc<SpaceConfig>,
 }
@@ -1860,6 +1891,13 @@ impl Endpoint for RunsEndpoint {
             trace_span: inv.trace_span(),
         };
         run.id = shared.backend.start_run(&name, &run)?;
+        // From here the run is recorded as started, so it is recorded as ended whatever
+        // happens to this future: dropped before it finishes (a caller that stops waiting,
+        // a host's timeout), it is recorded as cancelled rather than left `running`.
+        let mut unfinished = Unfinished {
+            backend: shared.backend.as_ref(),
+            run: Some(run.clone()),
+        };
         let Planned {
             request,
             keep,
@@ -1869,6 +1907,7 @@ impl Endpoint for RunsEndpoint {
             .issue_attenuated(request, keep)
             .await
             .map_err(|e| explain(note.as_deref(), e));
+        unfinished.run = None;
         run.ended = inv.now().map(|t| t.as_millis());
         match answer {
             Ok(repr) => {
@@ -1884,7 +1923,7 @@ impl Endpoint for RunsEndpoint {
             }
             Err(error) => {
                 run.outcome = Outcome::Failed {
-                    kind: kind(&error).to_string(),
+                    kind: error.kind().to_string(),
                     message: error.to_string(),
                 };
                 shared.backend.finish_run(&name, &run)?;
@@ -2473,22 +2512,6 @@ impl Space for ScriptSpace {
     }
 }
 
-/// An error's kind, as a run record spells it.
-fn kind(error: &Error) -> &'static str {
-    match error {
-        Error::Unresolved(_) => "unresolved",
-        Error::MissingArgument(_) => "missing-argument",
-        Error::InvalidArgument { .. } => "invalid-argument",
-        Error::Endpoint(_) => "endpoint",
-        Error::Denied(_) => "denied",
-        Error::NotFound(_) => "not-found",
-        Error::Conflict(_) => "conflict",
-        Error::Timeout(_) => "timeout",
-        Error::Unavailable(_) => "unavailable",
-        _ => "other",
-    }
-}
-
 /// The same error, of the same type, naming the run record it was written to.
 fn annotate(error: Error, run: &str) -> Error {
     let note = |message: String| format!("{message} (run recorded at {run})");
@@ -2499,10 +2522,34 @@ fn annotate(error: Error, run: &str) -> Error {
         Error::Conflict(m) => Error::Conflict(note(m)),
         Error::Timeout(m) => Error::Timeout(note(m)),
         Error::Unavailable(m) => Error::Unavailable(note(m)),
+        Error::Gone(m) => Error::Gone(note(m)),
+        Error::Refused(m) => Error::Refused(note(m)),
         Error::InvalidArgument { name, detail } => Error::InvalidArgument {
             name,
             detail: note(detail),
         },
+        Error::OverBudget { detail } => Error::OverBudget {
+            detail: note(detail),
+        },
+        Error::RetryAfter { delay, detail } => Error::RetryAfter {
+            delay,
+            detail: note(detail),
+        },
+        Error::Unsupported { verb, detail } => Error::Unsupported {
+            verb,
+            detail: note(detail),
+        },
+        Error::GaveUp {
+            attempts,
+            elapsed,
+            detail,
+        } => Error::GaveUp {
+            attempts,
+            elapsed,
+            detail: note(detail),
+        },
+        // An unresolved target, a missing argument's name and a depth carry no message to
+        // add to; the record is still written and still says the kind.
         other => other,
     }
 }
