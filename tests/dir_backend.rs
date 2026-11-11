@@ -279,3 +279,46 @@ fn a_starting_run_is_never_read_half_written() {
         }
     });
 }
+
+#[test]
+fn a_version_digest_has_only_one_spelling() {
+    let scratch = Scratch::new("canonical-digest");
+    let host = host_over(&scratch.0);
+    let iri = publish(&host.kernel, "job", "1", &[]);
+    let (prefix, hex) = iri.split_once("sha256:").unwrap();
+    let alias = format!("{prefix}sha256:{}", hex.to_ascii_uppercase());
+    assert_ne!(alias, iri);
+    assert_eq!(ok(&host.kernel, Verb::Source, &iri, &[]), "1");
+    let answer = call(&host.kernel, &Capability::root(), Verb::Source, &alias, &[]);
+    assert!(
+        matches!(
+            answer,
+            Err(Error::InvalidArgument { .. }) | Err(Error::NotFound(_))
+        ),
+        "{answer:?}"
+    );
+    assert_eq!(ok(&host.kernel, Verb::Exists, &alias, &[]), "false\n");
+}
+
+#[test]
+fn noncanonical_run_filenames_do_not_allocate_run_numbers() {
+    let scratch = Scratch::new("canonical-run-file");
+    let host = host_over(&scratch.0);
+    publish(&host.kernel, "job", "1", &[]);
+    ok(&host.kernel, Verb::Sink, "urn:script:job:runs", &[]);
+    let runs = scratch.0.join("job").join("runs");
+    for filename in ["02.json", "+3.json"] {
+        fs::write(runs.join(filename), "a note, not a run").unwrap();
+    }
+    assert_eq!(host.backend.last_run("job").unwrap().unwrap().id, 1);
+    assert_eq!(
+        ok(&host.kernel, Verb::Sink, "urn:script:job:runs", &[]).trim(),
+        "urn:script:job:run:2"
+    );
+    for filename in ["02.json", "+3.json"] {
+        assert_eq!(
+            fs::read_to_string(runs.join(filename)).unwrap(),
+            "a note, not a run"
+        );
+    }
+}

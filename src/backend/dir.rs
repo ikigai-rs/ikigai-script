@@ -79,15 +79,19 @@ impl DirBackend {
     fn version_path(&self, name: &str, digest: &str) -> Result<PathBuf> {
         let hex = digest
             .strip_prefix("sha256:")
-            .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+            .filter(|h| {
+                h.len() == 64
+                    && h.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
             .ok_or_else(|| Error::InvalidArgument {
                 name: "digest".to_string(),
-                detail: format!("`{digest}` is not `sha256:` and 64 hex digits"),
+                detail: format!(
+                    "`{digest}` is not a version digest for urn:script:{name}; \
+                     use `sha256:` and 64 lowercase hex digits"
+                ),
             })?;
-        Ok(self
-            .dir(name)
-            .join("versions")
-            .join(format!("{}.json", hex.to_ascii_lowercase())))
+        Ok(self.dir(name).join("versions").join(format!("{hex}.json")))
     }
 
     fn run_path(&self, name: &str, id: u64) -> PathBuf {
@@ -125,7 +129,7 @@ impl DirBackend {
             if let Some(id) = file
                 .to_str()
                 .and_then(|f| f.strip_suffix(".json"))
-                .and_then(|stem| stem.parse::<u64>().ok())
+                .and_then(crate::name::run_id)
             {
                 last = last.max(id);
             }
@@ -182,7 +186,7 @@ impl Backend for DirBackend {
             budget: file.budget,
             source: file.source,
         };
-        if version.digest() != digest.to_ascii_lowercase() {
+        if version.digest() != digest {
             return Err(Error::Endpoint(format!(
                 "{} does not match the digest it is named by (edited out of band); this \
                  version cannot be trusted. Publish the content again to restore it",
