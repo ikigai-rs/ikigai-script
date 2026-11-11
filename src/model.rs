@@ -285,8 +285,11 @@ pub enum Outcome {
     Ok,
     /// Finished with an error.
     Failed {
-        /// The error's kind: `denied`, `not-found`, `conflict`, `invalid-argument`,
-        /// `timeout`, `unavailable`, `endpoint`, …
+        /// The error's kind, as `ikigai_core::Error::kind` names it (`denied`, `not-found`,
+        /// `conflict`, `invalid-argument`, `timeout`, `unavailable`, `over-budget`,
+        /// `depth-exceeded`, `endpoint`, …), or `cancelled` for a run whose request was
+        /// dropped before it finished. An older record may say `other` for a kind
+        /// outside the first seven.
         kind: String,
         /// The error, as text.
         message: String,

@@ -63,6 +63,9 @@ has no binary, so it writes nothing to a terminal.
   `a_reserved_parameter_name_is_refused_naming_every_reserved_name` pin what those refusals say.
 - `tests/lifecycle.rs`: `a_run_for_effects_is_recorded` pins `outcome:    ok` in the run record,
   and `a_retired_script_is_readable_and_never_runs` pins `retired urn:script:…`.
+- `tests/run_records.rs`: `a_failed_runs_record_keeps_the_errors_own_kind` pins
+  `failed (<kind>)` for each kind, and `a_run_its_caller_stopped_waiting_for_is_recorded_as_cancelled`
+  pins `failed (cancelled)` and that its message names the script.
 - The doctest on `model::when` pins the time format; a unit test in `src/model.rs` pins that a
   cut result is cut on a character boundary.
 
