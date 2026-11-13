@@ -117,7 +117,9 @@ ikigai-store = "0.5.0"
 # **0.21.1 since ledger #3371**: the ledger built on store 0.5.0, so the graph carries one store.
 # 0.20.0 added cross-ledger listings and a claim fencing epoch; 0.21.0 enforces the label grammar
 # and makes close/reopen retry, then refuse as Conflict. `tests/root_plan.rs` appends one item and
-# reads `next`/`items`, which neither release changed. The caret is `<0.22.0`.
+# reads `next`/`items`, which neither release changed. 0.22.0 (2026-11-13) adds session summaries, a
+# summaries-only grant, a fourth finding severity and a JSON ledgers listing; none changes `next` or
+# `items`. The caret is `<0.23.0`.
 ikigai-ledger = "0.22.0"
 # The REAL plan doors (`urn:plan:eval`, `urn:plan:validate`, `urn:plan:requires`), which every
 # plan test runs against beside the double in `tests/common/plan.rs` (ledger #1222): the double
