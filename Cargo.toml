@@ -118,7 +118,7 @@ ikigai-store = "0.5.0"
 # 0.20.0 added cross-ledger listings and a claim fencing epoch; 0.21.0 enforces the label grammar
 # and makes close/reopen retry, then refuse as Conflict. `tests/root_plan.rs` appends one item and
 # reads `next`/`items`, which neither release changed. The caret is `<0.22.0`.
-ikigai-ledger = "0.21.1"
+ikigai-ledger = "0.22.0"
 # The REAL plan doors (`urn:plan:eval`, `urn:plan:validate`, `urn:plan:requires`), which every
 # plan test runs against beside the double in `tests/common/plan.rs` (ledger #1222): the double
 # states the contract this crate relies on, the engine is what a host binds. `plan-reader` is
