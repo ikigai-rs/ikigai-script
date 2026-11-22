@@ -232,29 +232,35 @@ fn gated_head(
             return Ok(Some(head));
         }
     }
-    Err(Error::Denied(format!(
-        "this capability holds none of {} — nor, for a public script, {}. {GRANT_FORMS}, and \
+    Err(Error::Denied(
+        format!(
+            "this capability holds none of {} — nor, for a public script, {}. {GRANT_FORMS}, and \
          an exclusion (`…:-{{name}}`) takes one back out",
-        acts.iter()
-            .map(|(act, _)| cap(*act, name))
-            .collect::<Vec<_>>()
-            .join(", "),
-        acts.iter()
-            .map(|(_, public)| *public)
-            .collect::<Vec<_>>()
-            .join(", ")
-    )))
+            acts.iter()
+                .map(|(act, _)| cap(*act, name))
+                .collect::<Vec<_>>()
+                .join(", "),
+            acts.iter()
+                .map(|(_, public)| *public)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .into(),
+    ))
 }
 
 fn require(inv: &Invocation<'_>, act: Act, name: &str, doing: &str) -> Result<()> {
     if may(inv, act, name) {
         Ok(())
     } else {
-        Err(Error::Denied(format!(
-            "{doing} needs `{}`, which this capability does not hold. {GRANT_FORMS}, and an \
+        Err(Error::Denied(
+            format!(
+                "{doing} needs `{}`, which this capability does not hold. {GRANT_FORMS}, and an \
              exclusion (`…:-{{name}}`) takes one back out",
-            cap(act, name)
-        )))
+                cap(act, name)
+            )
+            .into(),
+        ))
     }
 }
 
@@ -1191,11 +1197,14 @@ async fn prepare_run(
         }
     }
     if !may_run {
-        return Err(Error::Denied(format!(
-            "running urn:script:{name} needs {}. {GRANT_FORMS}, and an exclusion \
+        return Err(Error::Denied(
+            format!(
+                "running urn:script:{name} needs {}. {GRANT_FORMS}, and an exclusion \
              (`…:-{{name}}`) takes one back out",
-            run_grant()
-        )));
+                run_grant()
+            )
+            .into(),
+        ));
     }
     let ceiling = (shared.ceiling)(name);
     let keep = authority::effective(
@@ -1254,7 +1263,10 @@ struct Planned {
 /// A run's refusal, with the run's [`Planned::note`] said after it when there is one.
 fn explain(note: Option<&str>, error: Error) -> Error {
     match (note, error) {
-        (Some(note), Error::Denied(message)) => Error::Denied(format!("{message}. {note}")),
+        (Some(note), Error::Denied(denial)) => {
+            let message = format!("{denial}. {note}");
+            Error::Denied(denial.reworded(message))
+        }
         (_, error) => error,
     }
 }
@@ -1526,11 +1538,14 @@ async fn plan_sparql(
         }
     }
     if dataset.is_empty() {
-        return Err(Error::Denied(format!(
+        return Err(Error::Denied(
+            format!(
             "urn:script:{name} reads the caller's readable graphs, and this run may read none: \
              it needs `{}` grants the publisher held, the host allows and the runner holds",
             sparql::READ_GRAPH_PREFIX
-        )));
+        )
+            .into(),
+        ));
     }
     keep.extend(extra);
     for graph in &dataset {
@@ -1559,17 +1574,23 @@ fn may_use(
     runner: &ikigai_core::Capability,
 ) -> Result<()> {
     if !runner.allows(scope) {
-        return Err(Error::Denied(format!(
+        return Err(Error::Denied(
+            format!(
             "running urn:script:{name} reads or writes <{graph}>, which needs `{scope}`, and the \
              runner does not hold it"
-        )));
+        )
+            .into(),
+        ));
     }
     if !keep.contains(scope) {
-        return Err(Error::Denied(format!(
-            "running urn:script:{name} reads or writes <{graph}>, which needs `{scope}`, and \
+        return Err(Error::Denied(
+            format!(
+                "running urn:script:{name} reads or writes <{graph}>, which needs `{scope}`, and \
              this script may not have it: its publisher did not hold it, or the host's ceiling \
              for it does not allow it"
-        )));
+            )
+            .into(),
+        ));
     }
     Ok(())
 }
@@ -2517,7 +2538,10 @@ fn annotate(error: Error, run: &str) -> Error {
     let note = |message: String| format!("{message} (run recorded at {run})");
     match error {
         Error::Endpoint(m) => Error::Endpoint(note(m)),
-        Error::Denied(m) => Error::Denied(note(m)),
+        Error::Denied(d) => {
+            let message = note(d.message().to_string());
+            Error::Denied(d.reworded(message))
+        }
         Error::NotFound(m) => Error::NotFound(note(m)),
         Error::Conflict(m) => Error::Conflict(note(m)),
         Error::Timeout(m) => Error::Timeout(note(m)),
@@ -2578,11 +2602,14 @@ impl Endpoint for RunEndpoint {
         // A run record says who ran what: readable by the script's readers and its named
         // runners, never through the public grants.
         if !may(inv, Act::Read, &name) && !may(inv, Act::Run, &name) {
-            return Err(Error::Denied(format!(
-                "a run record of urn:script:{name} needs `{}` or `{}`. {GRANT_FORMS}",
-                cap(Act::Read, &name),
-                cap(Act::Run, &name)
-            )));
+            return Err(Error::Denied(
+                format!(
+                    "a run record of urn:script:{name} needs `{}` or `{}`. {GRANT_FORMS}",
+                    cap(Act::Read, &name),
+                    cap(Act::Run, &name)
+                )
+                .into(),
+            ));
         }
         let id_text = inv
             .bindings

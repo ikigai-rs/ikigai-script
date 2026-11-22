@@ -1,6 +1,6 @@
 [package]
 name = "ikigai-script"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 # The toolchain the shared CI's msrv job builds and tests on. Nothing in this crate needs
 # more than edition 2021; 1.89 is the line the ecosystem's other declared crates
@@ -26,7 +26,9 @@ categories = ["development-tools"]
 [dependencies]
 # Core 0.3 scopes held content to its deliverer and makes root-only store writes
 # explicit (the scoped content store, ledger #2965).
-ikigai-core = "0.3.0"
+# **0.4.0 since ledger #3914**: core 0.4.0 (scope opacity, structured denials; the cascade, epic
+# #3893). The caret is `<0.5.0`.
+ikigai-core = "0.4.0"
 # `Endpoint::invoke` is `async_trait`, and these endpoints carry state (the backend and the
 # host's ceiling), so they are `Endpoint` impls, not closures.
 async-trait = "0.1"
@@ -73,16 +75,18 @@ oxrdf = "0.3.4"
 futures = "0.3"
 # The module recipe as one test. BODIES and BODY-INPUTS are enabled by default;
 # the suite supplies the same module space the kernel binds so bodies are probed.
-ikigai-conformance = "0.14.0"
+# **0.15.0 since ledger #3914**: the conformance suite on core 0.4 (the cascade, epic #3893).
+ikigai-conformance = "0.15.0"
 # The evaluator, through the kernel, as a host would mount it. The LIBRARY never links
 # Steel: a script reaches `urn:lisp:eval` as a sub-request, so the language is a resource.
-# 0.5.0 is the published core 0.3 line.
-ikigai-lisp = "0.5.0"
+# 0.5.0 is the published core 0.3 line; **0.6.0 since ledger #3914** is the core 0.4 line.
+ikigai-lisp = "0.6.0"
 # `TurtleRenderer` gives the test kernels a JSON Meta face. ⚠ Without one the engine's
 # pipe routing cannot be observed (it fails open onto an input named `in`), and the
 # conformance walk needs it, so every test kernel is `Kernel::with_meta_renderer`.
 # Vocab 0.3 follows core 0.3 and its scoped content store (ledger #2965).
-ikigai-vocab = "0.3.0"
+# **0.4.0 since ledger #3914**: core 0.4.0 (scope opacity, structured denials; the cascade).
+ikigai-vocab = "0.4.0"
 # The store a SPARQL script runs against in the tests, in memory, bound exactly as a host binds
 # it: every run is a sub-request to its graph-scoped doors. 0.2.7 is where caller SPARQL is
 # bounded before the parser sees it (ledger #915), the behavior `src/limits.rs` copies.
@@ -108,7 +112,8 @@ ikigai-vocab = "0.3.0"
 # **0.5.0 since ledger #3371** (wave 3 of the store 0.5.0 cascade, #3348): it adds the
 # `store-graph-written` door, which `STORE_IDS` in `tests/conformance.rs` now names. The caret is
 # `<0.6.0`, so the 0.4 line is excluded.
-ikigai-store = "0.5.0"
+# **0.6.0 since ledger #3914**: the store on core 0.4 (the cascade, epic #3893).
+ikigai-store = "0.6.0"
 # The module a plan's steps read in `tests/root_plan.rs` (ledger #1220): a plan whose one step
 # is `Source urn:iki:ledger:{L}:next` or `…:items`, run under gonk's script ceiling copied
 # verbatim. Its reads DECLARE families (`urn:cap:ledger:read:*`, `urn:cap:store:read:graph:*`)
@@ -120,7 +125,8 @@ ikigai-store = "0.5.0"
 # reads `next`/`items`, which neither release changed. 0.22.0 (2026-11-13) adds session summaries, a
 # summaries-only grant, a fourth finding severity and a JSON ledgers listing; none changes `next` or
 # `items`. The caret is `<0.23.0`.
-ikigai-ledger = "0.22.0"
+# **0.25.0 since ledger #3914**: the ledger on core 0.4 and store 0.6 (the cascade, epic #3893).
+ikigai-ledger = "0.25.0"
 # The REAL plan doors (`urn:plan:eval`, `urn:plan:validate`, `urn:plan:requires`), which every
 # plan test runs against beside the double in `tests/common/plan.rs` (ledger #1222): the double
 # states the contract this crate relies on, the engine is what a host binds. `plan-reader` is
@@ -130,7 +136,8 @@ ikigai-ledger = "0.22.0"
 # **0.5.0 since ledger #3371**: the engine built on store 0.5.0, so the graph carries one store.
 # It refuses a relative or empty config home; no test here reaches one (`plan_space` reads no
 # config). The caret is `<0.6.0`, so the 0.4 line is excluded.
-ikigai-engine = { version = "0.5.0", features = ["plan-reader"] }
+# **0.6.0 since ledger #3914**: the engine on core 0.4 and store 0.6 (the cascade, epic #3893).
+ikigai-engine = { version = "0.6.0", features = ["plan-reader"] }
 # What `urn:plan:validate` composes: the plan doors validate by sub-request to
 # `urn:shacl:validate` with the published shapes, so a host binding the engine's doors binds
 # this beside them. 0.6.0 is the published core 0.3 line; **0.6.1 since ledger #3371** is the
@@ -138,7 +145,8 @@ ikigai-engine = { version = "0.5.0", features = ["plan-reader"] }
 # rudof, whose `rudof_rdf` turns on `oxigraph/http-client` and oxrdf's `rdf-12` in the TEST
 # build by feature unification: the egress test's refusals hold in that build too, and its
 # live-client controls still run only under `http-client-probe`.
-ikigai-shacl = "0.6.1"
+# **0.7.0 since ledger #3914**: shacl on core 0.4 and store 0.6 (the cascade, epic #3893).
+ikigai-shacl = "0.7.0"
 # Only for the egress test's CONTROL (`tests/sparql_service_egress.rs`): oxigraph's own
 # evaluator, with no ikigai layer, really does reach a local stub in the probe build, so "the
 # stub saw nothing" is not vacuous. No default features: the probe feature adds the client.

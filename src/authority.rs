@@ -582,11 +582,14 @@ pub fn grant_at_publish(publisher: &Capability, declared: &BTreeSet<String>) -> 
         }
     }
     if !missing.is_empty() {
-        return Err(Error::Denied(format!(
-            "a script cannot be given more than its publisher holds, and this capability \
+        return Err(Error::Denied(
+            format!(
+                "a script cannot be given more than its publisher holds, and this capability \
              does not hold {} — declare less, or publish under a capability that holds it",
-            missing.join(", ")
-        )));
+                missing.join(", ")
+            )
+            .into(),
+        ));
     }
     let exclusions = publisher
         .scopes()
@@ -725,16 +728,19 @@ pub fn parse_budget(text: &str) -> Result<u64> {
 pub fn budget_at_publish(publisher: &Capability, declared: u64) -> Result<u64> {
     match held_budget(publisher) {
         Some(held) if held >= declared => Ok(held),
-        held => Err(Error::Denied(format!(
-            "a script cannot be given more store time than its publisher holds: it declares \
+        held => Err(Error::Denied(
+            format!(
+                "a script cannot be given more store time than its publisher holds: it declares \
              budget={declared} ms, and this capability holds {} — declare less, or publish \
              under a capability holding `{}`",
-            match held {
-                Some(held) => format!("`{}` ({held} ms) at most", cap_budget(held)),
-                None => "no store budget grant (only the store's base)".to_string(),
-            },
-            cap_budget(declared)
-        ))),
+                match held {
+                    Some(held) => format!("`{}` ({held} ms) at most", cap_budget(held)),
+                    None => "no store budget grant (only the store's base)".to_string(),
+                },
+                cap_budget(declared)
+            )
+            .into(),
+        )),
     }
 }
 

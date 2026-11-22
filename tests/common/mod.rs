@@ -220,7 +220,7 @@ pub fn cap(scopes: &[&str]) -> Capability {
 /// Assert `result` is a typed `Denied`, and return its message.
 pub fn denied(result: std::result::Result<String, Error>) -> String {
     match result {
-        Err(Error::Denied(message)) => message,
+        Err(Error::Denied(denial)) => denial.into_message(),
         other => panic!("expected a typed Denied, got {other:?}"),
     }
 }
@@ -413,7 +413,9 @@ fn plan_probes() -> EndpointSpace {
         let host = inv.inline_str("host")?;
         let exact = format!("urn:cap:test:net:{host}");
         if !inv.capability.allows(&exact) {
-            return Err(Error::Denied(format!("reaching {host} needs `{exact}`")));
+            return Err(Error::Denied(
+                format!("reaching {host} needs `{exact}`").into(),
+            ));
         }
         Ok(Representation::new(
             ReprType::new("text/plain"),
