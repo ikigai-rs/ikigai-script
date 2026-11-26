@@ -78,7 +78,16 @@ runs it.
 Reading a script's source is a fourth grant, `urn:cap:script:read:{name}` (or
 `urn:cap:script:read:public` for a public, published script): code is a different
 sensitivity from running it. A caller without the grant is refused the same way whether
-the script exists or not.
+the script exists or not. `…:compiled` carries the program, so it takes the same read grant
+(never the run grant, and never `urn:cap:script:run:public`): a run prepares its program
+itself and hands it to the evaluator without the runner reading it.
+
+What a reader or runner is shown of exclusions is only the part about the script. `…:compiled`
+and a run record list an exclusion only when it is in a family one of the script's (or the
+run's) grants is in: a publisher holding `urn:cap:fs:read:-/srv/payroll` publishes a script
+that reads `urn:cap:fs:read:/srv` and its compiled form names the exclusion; a script that
+reads no files does not. Every run is still attenuated with every exclusion, so this only
+narrows what is shown, never what a run may touch.
 
 **Namespaces.** Each of the four may be held for one script or for a NAMESPACE of them:
 `urn:cap:script:{act}:{namespace}-*` covers every name that begins `{namespace}-`

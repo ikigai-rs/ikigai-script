@@ -313,7 +313,9 @@ pub struct Run {
     /// Who ran it: the principal the runner's capability named
     /// ([`crate::authority::principal_of`]), never caller-supplied.
     pub principal: String,
-    /// The capability the run executed under, exactly: grants and exclusions.
+    /// The capability the run executed under, exactly: grants and exclusions. Stored
+    /// whole; `urn:script:{name}:run:{id}` answers every grant and only the exclusions about
+    /// them ([`crate::authority::exclusions_about`]).
     pub capability: BTreeSet<String>,
     /// When it started, from the kernel's clock.
     pub started: Option<u64>,
