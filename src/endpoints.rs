@@ -2,8 +2,9 @@
 //!
 //! Only two of them hold state — the script (its head and versions) and a run — and they
 //! hold it through the host's [`Backend`]. Everything else is composed: `…:result` and
-//! `…:runs` read `…:compiled` through the kernel and hand the program to the language's
-//! evaluator as a sub-request; `urn:script:eval` saves a draft by sinking to the script
+//! `…:runs` prepare the program as `…:compiled` does (that resource is behind the read
+//! grant, and a runner need not hold it) and hand it to the language's evaluator as a
+//! sub-request; `urn:script:eval` saves a draft by sinking to the script
 //! like any other writer.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1015,7 +1016,9 @@ pub struct Prepared {
     pub requires: BTreeSet<String>,
     /// What its publisher held of that.
     pub granted: BTreeSet<String>,
-    /// The publisher's exclusions.
+    /// The publisher's exclusions. Every one in what a run is attenuated with; as
+    /// `…:compiled` answers it, only those about the script's grants
+    /// ([`authority::exclusions_for`]).
     pub exclusions: BTreeSet<String>,
     /// The store time budget it declares, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1039,6 +1042,59 @@ struct CompiledEndpoint {
     shared: Arc<SpaceConfig>,
 }
 
+/// The head of `name` prepared for its evaluator, for a caller who may do one of `acts` to
+/// it ([`gated_head`]) and may see its head version ([`seen_head`]). Every exclusion the
+/// publisher held is in it: this is what a run is attenuated with.
+///
+/// ★ Hung from the SCRIPT's thread, which every publish and retire cuts (the kernel cuts
+/// the thread named after a Sink's or Delete's target), and named FIRST so a NotFound
+/// carries it as well as a success (ledger #1079): without it a cached compiled form or
+/// run would outlive the version it was prepared from, and a cached fallback over "nothing
+/// is published here" (or "this draft is not yours") would outlive the publish that ended
+/// it.
+fn prepare(
+    inv: &Invocation<'_>,
+    shared: &SpaceConfig,
+    name: &str,
+    acts: &[(Act, &str)],
+) -> Result<Prepared> {
+    inv.depends_on(name::script_iri(name));
+    let gated = gated_head(inv, shared, name, acts)?;
+    let head = seen_head(inv, name, gated)?;
+    let version = head_version(shared, &head)?;
+    let (evaluator, analysis, plan_analysis) = match version.language {
+        Language::Lisp => (LISP_EVAL.to_string(), None, None),
+        Language::Sparql => {
+            let door = door(shared)?;
+            let analysis = sparql::analyze(&version.source, door)?;
+            (door.query_iri(analysis.form), Some(analysis), None)
+        }
+        Language::Plan => (
+            plan::EVAL.to_string(),
+            None,
+            Some(plan::analyze(&version.source)?),
+        ),
+    };
+    Ok(Prepared {
+        schema: SCHEMA,
+        iri: name::part_iri(name, "compiled"),
+        version: head.version.clone(),
+        language: version.language,
+        evaluator,
+        program: version.source,
+        requires: version.requires,
+        granted: head.granted,
+        exclusions: head.exclusions,
+        budget: version.budget,
+        granted_budget: head.granted_budget,
+        public: head.public,
+        state: head.state,
+        sparql: analysis,
+        plan: plan_analysis,
+        name: name.to_string(),
+    })
+}
+
 #[async_trait]
 impl Endpoint for CompiledEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
@@ -1046,55 +1102,14 @@ impl Endpoint for CompiledEndpoint {
             return Err(unsupported("script-compiled", inv.request.verb));
         }
         let name = name::from_bindings(inv)?;
-        // ★ Hung from the SCRIPT's thread, which every publish and retire cuts (the kernel
-        // cuts the thread named after a Sink's or Delete's target), and named FIRST so a
-        // NotFound carries it as well as a success (ledger #1079): without it a cached
-        // compiled form would outlive the version it was prepared from, and a cached fallback
-        // over "nothing is published here" (or "this draft is not yours") would outlive the
-        // publish that ended it. A run as a read reaches this form by sub-request, so its
-        // answers, and its misses, inherit the thread.
-        inv.depends_on(name::script_iri(&name));
-        // Readable by a reader or a runner: a run reads its program here. A draft's program
-        // is its author's alone, so a run of someone else's draft finds nothing to run.
-        let gated = gated_head(
-            inv,
-            &self.shared,
-            &name,
-            &[(Act::Read, CAP_READ_PUBLIC), (Act::Run, CAP_RUN_PUBLIC)],
-        )?;
-        let head = seen_head(inv, &name, gated)?;
-        let version = head_version(&self.shared, &head)?;
-        let (evaluator, analysis, plan_analysis) = match version.language {
-            Language::Lisp => (LISP_EVAL.to_string(), None, None),
-            Language::Sparql => {
-                let door = door(&self.shared)?;
-                let analysis = sparql::analyze(&version.source, door)?;
-                (door.query_iri(analysis.form), Some(analysis), None)
-            }
-            Language::Plan => (
-                plan::EVAL.to_string(),
-                None,
-                Some(plan::analyze(&version.source)?),
-            ),
-        };
-        let prepared = Prepared {
-            schema: SCHEMA,
-            iri: name::part_iri(&name, "compiled"),
-            version: head.version.clone(),
-            language: version.language,
-            evaluator,
-            program: version.source,
-            requires: version.requires,
-            granted: head.granted,
-            exclusions: head.exclusions,
-            budget: version.budget,
-            granted_budget: head.granted_budget,
-            public: head.public,
-            state: head.state,
-            sparql: analysis,
-            plan: plan_analysis,
-            name: name.clone(),
-        };
+        // ★ The compiled form carries the PROGRAM, so it is the source's sensitivity:
+        // readable by a holder of the script's read grant (or, for a public script, the
+        // public read grant), never by a runner as such. A run prepares its program itself
+        // ([`prepare_run`]) and hands it to the evaluator without the runner reading it. A
+        // draft's program is its author's alone.
+        let mut prepared = prepare(inv, &self.shared, &name, &[(Act::Read, CAP_READ_PUBLIC)])?;
+        // What it says of the publisher's exclusions is only the part about this script.
+        prepared.exclusions = authority::exclusions_for(&prepared.granted, &prepared.exclusions);
         Ok(json(&prepared)?.cacheable())
     }
 
@@ -1109,8 +1124,10 @@ impl Endpoint for CompiledEndpoint {
                 "The head version prepared for its evaluator, with the authority it runs \
                  under (and, for SPARQL, its form, parameters and graphs; for a plan, its \
                  steps' verbs and its parameters): cached, and cut \
-                 whenever the script is republished or retired. Readable by a holder of the \
-                 script's read OR run grant (a run reads its program here).",
+                 whenever the script is republished or retired. It carries the program, so \
+                 it is readable by a holder of the script's read grant (or, for a public \
+                 script, the public read grant), as the source is; its exclusions are only \
+                 those about the script's own grants.",
             )
             .verb(Verb::Meta)
             .action(
@@ -1118,7 +1135,7 @@ impl Endpoint for CompiledEndpoint {
                     .summary("The prepared form, as JSON.")
                     .input(name_arg())
                     .output(JSON)
-                    .requires(CAP_ANY),
+                    .requires(CAP_READ),
             )
     }
 }
@@ -1129,32 +1146,28 @@ impl Endpoint for CompiledEndpoint {
 
 const LISP_EVAL: &str = "urn:lisp:eval";
 
-/// Read the compiled form through the kernel, check the run gate and the state, and
-/// compute what the run may keep of the runner's capability (and under which ceiling).
+/// Prepare the script ([`prepare`]), check the run gate and the state, and compute what the
+/// run may keep of the runner's capability (and under which ceiling).
+///
+/// ★ Prepared HERE, not read from `…:compiled` through the kernel: that resource carries the
+/// program and is behind the read grant, and a sub-request would be issued under the
+/// runner's capability, so a runner who may not read the source could not run the script.
+/// The program goes from the backend to the evaluator and is never answered to the runner.
+/// The script's thread still lands on the run (`prepare` names it), so a publish or retire
+/// still reaches a cached `…:result`.
 async fn prepare_run(
     inv: &Invocation<'_>,
     shared: &SpaceConfig,
     name: &str,
 ) -> Result<(Prepared, BTreeSet<String>, Ceiling)> {
-    // Composed, not reached into: the run is a reader of its own compiled form, so the
-    // compiled form's thread (and the script's, through it) lands on the result.
-    let compiled = inv
-        .issue(Request::new(
-            Verb::Source,
-            iri(&name::part_iri(name, "compiled"))?,
-        ))
-        .await?;
-    let prepared: Prepared = serde_json::from_slice(&compiled.bytes).map_err(|e| {
-        Error::Endpoint(format!(
-            "urn:script:{name}:compiled did not answer a prepared form: {e}"
-        ))
-    })?;
-    if prepared.name != name {
-        return Err(Error::Endpoint(format!(
-            "urn:script:{name}:compiled answered for `{}`",
-            prepared.name
-        )));
-    }
+    // Gated on read OR run, as the compiled form once was, so what a caller is told (the
+    // state first, then the run grant) is unchanged; the run grant is checked below.
+    let prepared = prepare(
+        inv,
+        shared,
+        name,
+        &[(Act::Read, CAP_READ_PUBLIC), (Act::Run, CAP_RUN_PUBLIC)],
+    )?;
     let public = prepared.public && prepared.state == State::Published;
     let may_run =
         may(inv, Act::Run, name) || (public && may_public(inv, Act::Run, CAP_RUN_PUBLIC, name));
@@ -1169,7 +1182,7 @@ async fn prepare_run(
             }
         )
     };
-    // ★ The STATE first (ledger #1261): whoever reached the compiled form may read or run
+    // ★ The STATE first (ledger #1261): whoever got this far may read or run
     // this script and can see its head version (a draft's author, or root), so telling them
     // it is a draft or retired discloses nothing, and it is the reason the run cannot happen
     // whatever grant they hold. The run grant it will also need is said after it.
@@ -2633,9 +2646,14 @@ impl Endpoint for RunEndpoint {
             Verb::Exists => Ok(plain(if run.is_some() { "true\n" } else { "false\n" })),
             Verb::Source => {
                 let want = face_of(inv, &RECORD_FACES)?;
-                let run = run.ok_or_else(|| {
+                let mut run = run.ok_or_else(|| {
                     Error::NotFound(format!("urn:script:{name} has no run {id_text}"))
                 })?;
+                // Every grant the run held, and only the exclusions about them: one in a
+                // family it held no grant in (its publisher's or its runner's own policy)
+                // narrowed nothing it did. The stored record keeps them all; this applies to
+                // records an older release wrote as well.
+                run.capability = authority::exclusions_about(&run.capability);
                 let finished = run.outcome != Outcome::Running;
                 let repr = match want {
                     JSON => json(&run)?,

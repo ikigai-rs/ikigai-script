@@ -601,6 +601,70 @@ pub fn grant_at_publish(publisher: &Capability, declared: &BTreeSet<String>) -> 
     })
 }
 
+/// The capability family a scope belongs to: `fs` for `urn:cap:fs:read:/srv`, `lisp` for
+/// `urn:cap:lisp`. `None` for a string that is not a capability scope.
+fn scope_family(scope: &str) -> Option<&str> {
+    let rest = scope.strip_prefix("urn:cap:")?;
+    let family = rest.split(':').next().unwrap_or_default();
+    (!family.is_empty()).then_some(family)
+}
+
+/// What of `scopes` a script's own record SAYS: every grant, and only the exclusions in a
+/// family one of those grants is in. The rest are kept out of what a reader or a runner of
+/// the script is shown (`…:compiled`, a run record).
+///
+/// An exclusion narrows grants of its own family (`urn:cap:fs:read:-/srv/payroll` narrows
+/// `urn:cap:fs:read:/srv`; core's [`is_deny_scope`] spells the shape, and the module that
+/// owns the family reads it), so one in a family the script holds no grant in narrows
+/// nothing the script does: it is its publisher's (or its runner's) own policy, not the
+/// script's. Matching on the whole family rather than the exact qualifier keeps an
+/// exclusion whenever it could matter, at the price of showing a few that do not.
+///
+/// ⚠ Only what is SHOWN is narrowed: a run is still attenuated with every exclusion its
+/// publisher held ([`effective`]), so this can never widen what a run may touch.
+///
+/// ```
+/// use ikigai_script::authority::exclusions_about;
+/// use std::collections::BTreeSet;
+///
+/// let set = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+/// let shown = exclusions_about(&set(&[
+///     "urn:cap:lisp",
+///     "urn:cap:fs:read:/srv",
+///     "urn:cap:fs:read:-/srv/payroll",
+///     "urn:cap:net:-internal.example",
+/// ]));
+/// assert_eq!(
+///     shown,
+///     set(&["urn:cap:fs:read:-/srv/payroll", "urn:cap:fs:read:/srv", "urn:cap:lisp"])
+/// );
+/// ```
+pub fn exclusions_about(scopes: &BTreeSet<String>) -> BTreeSet<String> {
+    let families: BTreeSet<&str> = scopes
+        .iter()
+        .filter(|s| !is_deny_scope(s))
+        .filter_map(|s| scope_family(s))
+        .collect();
+    scopes
+        .iter()
+        .filter(|s| !is_deny_scope(s) || scope_family(s).is_some_and(|f| families.contains(f)))
+        .cloned()
+        .collect()
+}
+
+/// The publisher's `exclusions` that are about a script holding `granted`: those in a
+/// family one of its grants is in ([`exclusions_about`]).
+pub fn exclusions_for(
+    granted: &BTreeSet<String>,
+    exclusions: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let all: BTreeSet<String> = granted.union(exclusions).cloned().collect();
+    exclusions_about(&all)
+        .into_iter()
+        .filter(|s| exclusions.contains(s) && is_deny_scope(s))
+        .collect()
+}
+
 /// The scopes a run asks to keep: `{ s in declared : s in granted and ceiling.allows(s) }`
 /// plus the publisher's and the ceiling's exclusions. The run's capability is the runner's
 /// own [`Capability::attenuate`]d to this set — see the module documentation.

@@ -227,7 +227,7 @@ fn retiring_a_draft_does_not_publish_it() {
 }
 
 #[test]
-fn a_runner_who_is_not_the_author_cannot_read_a_drafts_compiled_form() {
+fn a_reader_who_is_not_the_author_cannot_read_a_drafts_compiled_form() {
     let host = stamped();
     let k = &host.kernel;
     let who = editor("job");
@@ -241,11 +241,13 @@ fn a_runner_who_is_not_the_author_cannot_read_a_drafts_compiled_form() {
     )
     .unwrap();
     let runner = cap(&["urn:cap:script:run:job", "urn:cap:lisp"]);
-    // The compiled form carries the program: absent to Bob, the author's to Alice.
+    let reader = cap(&["urn:cap:script:read:job"]);
+    // The compiled form carries the program, so it takes the read grant (a runner as such
+    // is refused it): absent to Bob, the author's to Alice.
     not_found(call_as(
         k,
         BOB,
-        &runner,
+        &reader,
         Verb::Source,
         "urn:script:job:compiled",
         &[],
@@ -253,7 +255,7 @@ fn a_runner_who_is_not_the_author_cannot_read_a_drafts_compiled_form() {
     call_as(
         k,
         ALICE,
-        &runner,
+        &reader,
         Verb::Source,
         "urn:script:job:compiled",
         &[],
